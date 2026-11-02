@@ -3,7 +3,9 @@
 POST /api/v1/webhooks/generic        {"title": "...", "message": "...", "sender": "...", "priority": "high", "id": "..."}
 POST /api/v1/webhooks/alertmanager   Prometheus Alertmanager webhook (version 4)
 
-Both use the ingest token. Re-deliveries are deduplicated through external_id.
+Both use an ingest token: as `Authorization: Bearer` header or, for senders that can't set
+headers, as `?token=` (ingest tokens only, never the admin token). Re-deliveries are
+deduplicated through external_id.
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..api.deps import get_conn, require_ingest
+from ..api.deps import get_conn, require_ingest_webhook
 from ..models.schemas import MAX_BODY, MAX_SENDER, MAX_SUBJECT, MessageCreate, Priority, Source
 from ..services import messages as svc
 
@@ -44,8 +46,9 @@ class AlertmanagerHook(BaseModel):
     alerts: list[dict[str, Any]] = Field(default_factory=list, max_length=200)
 
 
-def _store(conn: sqlite3.Connection, request: Request, response: Response, msg: MessageCreate) -> dict:
-    row, duplicate = svc.create_message(conn, msg)
+def _store(conn: sqlite3.Connection, request: Request, response: Response, msg: MessageCreate,
+           actor: str) -> dict:
+    row, duplicate = svc.create_message(conn, msg, origin=actor)
     if not duplicate:
         request.app.state.notifier.notify()
         response.status_code = status.HTTP_201_CREATED
@@ -53,18 +56,18 @@ def _store(conn: sqlite3.Connection, request: Request, response: Response, msg: 
 
 
 @router.post("/generic")
-def generic(hook: GenericHook, request: Request, response: Response, _: str = Depends(require_ingest),
+def generic(hook: GenericHook, request: Request, response: Response, actor: str = Depends(require_ingest_webhook),
             conn: sqlite3.Connection = Depends(get_conn)):
     if not hook.title and not hook.message:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "title or message required")
     msg = MessageCreate(source=Source.webhook, external_id=hook.id, sender=_clip(hook.sender, MAX_SENDER),
                         subject=_clip(hook.title, MAX_SUBJECT), body=_clip(hook.message, MAX_BODY),
                         priority=hook.priority)
-    return _store(conn, request, response, msg)
+    return _store(conn, request, response, msg, actor)
 
 
 @router.post("/alertmanager")
-def alertmanager(hook: AlertmanagerHook, request: Request, response: Response, _: str = Depends(require_ingest),
+def alertmanager(hook: AlertmanagerHook, request: Request, response: Response, actor: str = Depends(require_ingest_webhook),
                  conn: sqlite3.Connection = Depends(get_conn)):
     labels = hook.commonLabels
     severity = labels.get("severity", "").lower()
@@ -89,4 +92,4 @@ def alertmanager(hook: AlertmanagerHook, request: Request, response: Response, _
                         sender=_clip(hook.receiver or "Alertmanager", MAX_SENDER),
                         subject=_clip(subject, MAX_SUBJECT), body=_clip("\n".join(lines), MAX_BODY),
                         priority=priority, metadata={"alertname": name[:100], "status": hook.status})
-    return _store(conn, request, response, msg)
+    return _store(conn, request, response, msg, actor)

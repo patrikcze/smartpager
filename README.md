@@ -25,7 +25,7 @@ make device    # registers pager-1 and prints its token once
 make health
 ```
 
-Then open <http://127.0.0.1:8080/admin> and paste the admin token (`grep ADMIN .env`). `make` lists every target. They cover native runs (`make install test run`), backups (`make backup`), database import, and firmware build/flash. To let the pager reach the server over the LAN, set `SMARTPAGER_BIND=0.0.0.0` in `.env` (trusted network) or put HTTPS in front. See [docs/SETUP.md](docs/SETUP.md) and [docs/FLASHING.md](docs/FLASHING.md).
+For internet access over HTTPS, see [docs/DEPLOY_PUBLIC.md](docs/DEPLOY_PUBLIC.md) (`make up-public`). Then open <http://127.0.0.1:8080/admin> and paste the admin token (`grep ADMIN .env`). `make` lists every target. They cover native runs (`make install test run`), backups (`make backup`), database import, and firmware build/flash. To let the pager reach the server over the LAN, set `SMARTPAGER_BIND=0.0.0.0` in `.env` (trusted network) or put HTTPS in front. See [docs/SETUP.md](docs/SETUP.md) and [docs/FLASHING.md](docs/FLASHING.md).
 
 ---
 
@@ -73,6 +73,8 @@ Then open <http://127.0.0.1:8080/admin> and paste the admin token (`grep ADMIN .
 | Cache survives firmware update and reset (`cache=loaded messages=8 cursor=13` at boot) | **verified** |
 | Read/ack made with the device buttons reached the server (5 messages read, 4 acknowledged; delivered, read and acked recorded separately) | **verified** |
 | Docker: `make build` / `make up`, container healthy, data imported, pager synced against it (delivery ~2 s), runs non-root with a read-only root filesystem | **verified** |
+| Public-deployment hardening: Caddy routing (pager/ingest/webhook paths only; `/admin`, `/docs`, admin API → 404; long poll held through the proxy), admin token refused via proxy, 64 KB body cap, HSTS. Tested locally on `https://localhost` (Caddy internal CA); **not yet tested with a real domain and Let's Encrypt** | **verified locally** |
+| Signed OTA on the device: tampered manifest rejected ("Bad signature", nothing downloaded); correctly signed 0.2.1 offered, installed by the user, pager restarted on 0.2.1 with its inbox intact | **verified** |
 | Server outage 40 s: UI task and device kept running (no reboot, heap stable ~174–180 KB). Delivery after restart **52 s → 14.7 s** after capping backoff at 30 s | **verified** |
 
 ### Firmware memory (measured at build time)
@@ -87,7 +89,7 @@ Runtime budget by design:
 - LVGL draw buffers: 2 × 21.8 KB internal DMA RAM
 - HTTP responses: ≤ 48 KB
 
-Measured at runtime on the device: **free heap 174–180 KB, free PSRAM 8.27 MB** while syncing with long polling. Both appear in *Settings → Memory* and in the device status sent to the server.
+Measured at runtime on the device: **free internal heap 174–180 KB with 8 cached messages, 143 KB with 23** (LVGL's small per-row allocations use internal RAM; bounded by the 40-message cap), **free PSRAM 8.27 MB**. Both appear in *Settings → Memory* and in the device status sent to the server.
 
 ### Not yet verified (needs hardware or credentials)
 
@@ -97,6 +99,7 @@ Measured at runtime on the device: **free heap 174–180 KB, free PSRAM 8.27 MB*
    - touch coordinate mapping
    - watchdog behaviour under a real hang
    - Wi-Fi loss/reconnect (only server outages were tested)
+   - HTTPS against a real Let's Encrypt certificate on the device (the built-in roots are compiled in but untested against a live public server)
    - long-running memory behaviour: free heap went 180 → 174 → 170 KB over the first ~5 minutes of use. That is too short to tell a leak from LVGL settling. Watch `heap` in `/admin` over a day.
 2. **IMAP** against a live mailbox, and HTTPS against a real certificate: no account or certificate was available.
 
@@ -104,6 +107,7 @@ Measured at runtime on the device: **free heap 174–180 KB, free PSRAM 8.27 MB*
 
 - **Touch:** only the CST816 controller is supported. Early Touch units with a CST328 run on buttons only.
 - **Text:** fonts cover Latin, Latin-1 and Latin Extended-A. Emoji are stripped, and other scripts render as boxes.
+- **OTA rollback:** none. A release that doesn't boot needs a USB reflash.
 - **Data at rest:** messages and credentials on the device are not encrypted at rest. Flash encryption is deliberately not enabled because it is irreversible ([SECURITY.md](docs/SECURITY.md)).
 - **Single process:** one backend process. The rate limiter and long-poll notifier live in memory, which is fine for a single-user deployment.
 - **Event latency:** a read/ack made while a long poll is open is uploaded when that poll returns (≤ 20 s).

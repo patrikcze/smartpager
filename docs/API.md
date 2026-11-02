@@ -4,9 +4,11 @@ Base URL: `http://127.0.0.1:8080` for local development. Every `/api/v1` request
 
 | Credential | Where it comes from | Can do |
 |---|---|---|
-| **Ingest token** | `SMARTPAGER_INGEST_TOKEN` | `POST /messages`, `POST /webhooks/*` only |
+| **Ingest token** | named tokens (`POST /tokens`, `make ingest-token`) or the optional `SMARTPAGER_INGEST_TOKEN` | `POST /messages`, `POST /webhooks/*` only |
 | **Admin token** | `SMARTPAGER_ADMIN_TOKEN` | everything except the device endpoints |
 | **Device token** | issued per device (`smartpager-admin device-create`). Only its SHA-256 is stored | `GET /devices/{own id}/sync`, `POST /devices/{own id}/events` |
+
+Admin endpoints, `/admin`, `/docs` and `/openapi.json` answer **404** to requests that came through the public proxy (see [DEPLOY_PUBLIC.md](DEPLOY_PUBLIC.md)).
 
 Errors use FastAPI's shape: `{"detail": ...}`. The status codes are 401 (missing or bad token), 404, 409 (device exists), 413 (body > 64 KiB), 422 (validation), 429 (rate limited, with `Retry-After`) and 500 (no internal details are returned).
 
@@ -47,6 +49,8 @@ Message states are tracked separately:
 
 ## Webhooks (ingest)
 
+Authenticate with `Authorization: Bearer <ingest token>`. For senders that can't set headers, use `?token=<ingest token>`, which is accepted only here and never for the admin token.
+
 - `POST /api/v1/webhooks/generic`: `{"title", "message", "sender", "priority", "id"}`. Extra fields are ignored and long fields are clipped.
 - `POST /api/v1/webhooks/alertmanager`: Prometheus Alertmanager v4 payloads. `severity=critical|page` maps to priority critical, other firing alerts to high, and resolved alerts to low. Re-deliveries are deduplicated.
 
@@ -55,6 +59,22 @@ Message states are tracked separately:
 - `GET /api/v1/devices`: id, name, last_seen_at, last_ip, firmware, acked_cursor, and the last status report (rssi, heap, uptime, …).
 - `POST /api/v1/devices` `{"id": "pager-2", "name": "Desk"}` → `{"device": {...}, "token": "spd_…"}`. The token is shown only in this response.
 - `POST /api/v1/devices/{id}/token` rotates the token. The old one stops working immediately.
+
+## Integration tokens and audit (admin)
+
+- `GET /api/v1/tokens`: name, created, last used, revoked. Hashes and secrets are never returned.
+- `POST /api/v1/tokens` `{"name": "grafana"}` → `{"token_info": {...}, "token": "spi_…"}`. The token is shown only in this response.
+- `DELETE /api/v1/tokens/{id}` revokes it immediately. The name can be reused afterwards.
+- `GET /api/v1/audit?limit=100`: `{id, at, actor, action, target, ip}`, newest first.
+
+Messages carry `origin`: `admin`, `ingest` (the shared token) or `token:<name>`.
+
+## Firmware (device token)
+
+- `GET /api/v1/devices/{id}/firmware` → `{"version", "size", "sha256", "signature"}`, or 404 when nothing is published.
+- `GET /api/v1/devices/{id}/firmware/image` → the signed application image.
+
+`signature` is a base64 DER ECDSA P-256 signature over `smartpager-ota|<version>|<size>|<sha256>`. The device verifies it; the server only hosts the files (`make ota-publish`).
 
 ## Device sync protocol (schema 1)
 

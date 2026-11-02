@@ -103,6 +103,9 @@ void onSetting(sp::SettingAction a) {
         case sp::SettingAction::SyncNow:
             net::kick();
             break;
+        case sp::SettingAction::Update:
+            net::requestOta();
+            break;
         case sp::SettingAction::SetupMode:
             g_config.setupRequested = true;
             saveConfig();

@@ -63,12 +63,12 @@ void handleRoot() {
     h += F("\"></fieldset><fieldset><legend>Server</legend>"
            "<label>Server URL</label><input name=url required maxlength=95 placeholder=\"https://pager.example.com\" value=\"");
     h += esc(c.serverUrl);
-    h += F("\"><small>http:// only on a trusted LAN; https:// requires the CA certificate below.</small>"
+    h += F("\"><small>http:// only on a trusted LAN. https:// works with Let's Encrypt out of the box.</small>"
            "<label>Device ID</label><input name=dev required maxlength=40 pattern=\"[a-z0-9][a-z0-9-]+\" value=\"");
     h += esc(c.deviceId);
     h += F("\"><label>Device token</label><input name=token type=password maxlength=95 autocomplete=off placeholder=\"");
     h += c.token[0] ? F("(stored)") : F("spd_…");
-    h += F("\"><label>Root CA certificate (PEM, for https)</label><textarea name=ca placeholder=\"-----BEGIN CERTIFICATE-----\">");
+    h += F("\"><label>Custom root CA (PEM) — only for a private CA; leave empty for Let's Encrypt</label><textarea name=ca placeholder=\"-----BEGIN CERTIFICATE-----\">");
     h += esc(config::loadCaPem().c_str());
     h += F("</textarea></fieldset><fieldset><legend>Device</legend><label>Name</label><input name=name maxlength=32 value=\"");
     h += esc(c.name);
@@ -115,10 +115,9 @@ void handleSave() {
     c.setupRequested = false;
     String ca = server.arg("ca");
     ca.trim();
-    bool https = strncmp(c.serverUrl, "https://", 8) == 0;
     const char* err = nullptr;
-    if (strncmp(c.serverUrl, "http://", 7) != 0 && !https) err = "Server URL must start with http:// or https://";
-    else if (https && !ca.startsWith("-----BEGIN CERTIFICATE-----")) err = "HTTPS needs the server's root CA certificate (PEM).";
+    if (strncmp(c.serverUrl, "http://", 7) != 0 && strncmp(c.serverUrl, "https://", 8) != 0) err = "Server URL must start with http:// or https://";
+    else if (ca.length() && !ca.startsWith("-----BEGIN CERTIFICATE-----")) err = "The CA certificate must be PEM (-----BEGIN CERTIFICATE-----).";
     else if (ca.length() > 3800) err = "Certificate too large.";
     else if (!c.ssid[0] || !c.deviceId[0] || !c.token[0]) err = "Wi-Fi network, device ID and token are required.";
     if (err) {

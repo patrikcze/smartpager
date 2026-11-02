@@ -44,7 +44,7 @@ make device ID=pager-1
 The default binding is **localhost only**, so the pager on Wi-Fi can't reach it. Pick one of these:
 
 - **Trusted home LAN, plain HTTP** (development only). Set `SMARTPAGER_BIND=0.0.0.0` in `.env` (used by both `make run` and `make up`). Allow the port in the macOS firewall, then use `http://<mac-ip>:8080` as the server URL. Messages and the device token then cross your Wi-Fi unencrypted.
-- **HTTPS (recommended).** Put the server behind Caddy, nginx or Traefik with a real certificate, for example Let's Encrypt via a DNS challenge. Then enter `https://pager.example.com` and paste the issuing **root CA** PEM into the setup portal. For Let's Encrypt that is *ISRG Root X1*. The pager checks the chain and refuses `https://` without a CA. Certificate checking is never turned off.
+- **HTTPS (recommended, also from the internet).** Run `make up-public`, which uses the bundled Caddy with automatic Let's Encrypt. Then enter `https://pager.example.com` on the pager; the Let's Encrypt roots are built in. Full guide: [DEPLOY_PUBLIC.md](DEPLOY_PUBLIC.md).
 
 ## 3. Provision the pager
 
@@ -59,7 +59,7 @@ The default binding is **localhost only**, so the pager on Wi-Fi can't reach it.
 3. Join that Wi-Fi from a phone or laptop, open the page, and fill in:
    - Wi-Fi network and password
    - server URL, device ID and device token
-   - optionally: the CA certificate, time zone (POSIX TZ, default Europe/Prague `CET-1CEST,M3.5.0,M10.5.0/3`), polling interval, brightness, instant delivery (long polling), and 180° rotation
+   - optionally: a custom root CA (only for a private CA; Let's Encrypt works without it), time zone (POSIX TZ, default Europe/Prague `CET-1CEST,M3.5.0,M10.5.0/3`), polling interval, brightness, instant delivery (long polling), and 180° rotation
 4. Click **Save and restart**. The pager joins your Wi-Fi and syncs.
 
 **Shortcut over USB.** While the setup screen is shown you can pre-load the long values from your computer, so the phone form needs only Wi-Fi:

@@ -8,4 +8,7 @@ USER smartpager
 ENV SMARTPAGER_DB=/data/smartpager.db
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).status == 200 else 1)"
-CMD ["uvicorn", "--factory", "app.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log", "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1"]
+# Proxy headers are honoured only from FORWARDED_ALLOW_IPS (uvicorn reads it from the
+# environment; docker-compose sets it to the Caddy container). Single process by design.
+ENV FORWARDED_ALLOW_IPS=127.0.0.1
+CMD ["uvicorn", "--factory", "app.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log", "--proxy-headers", "--workers", "1"]

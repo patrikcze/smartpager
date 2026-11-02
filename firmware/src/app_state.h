@@ -10,7 +10,9 @@
 #include "storage/config_store.h"
 #include "ui/ui.h"
 
-#define SMARTPAGER_VERSION "0.1.0"
+#ifndef SMARTPAGER_VERSION
+#define SMARTPAGER_VERSION "0.2.1"
+#endif
 
 extern sp::MessageStore g_store;
 extern sp::DeviceStatus g_status;

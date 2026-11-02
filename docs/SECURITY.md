@@ -5,11 +5,13 @@
 | Secret | Stored | Notes |
 |---|---|---|
 | Admin token | server environment (`.env`, never committed) | full management API and the `/admin` console |
-| Ingest token | server environment | create messages and webhooks only. Give this one to scripts and connectors |
+| Ingest tokens | named per integration (`make ingest-token NAME=…`): server stores only the SHA-256. Optional shared one in `.env` | create messages and webhooks only. Revocable one by one; each message records its `origin` |
 | Device token | server: SHA-256 hash only. Device: NVS | one per device, rotatable (`POST /devices/{id}/token`). Only accepted for that device's own sync and events endpoints |
 | Wi-Fi password, device token, CA | device NVS (`smartpager` namespace) | see below |
 
-- The server refuses to start unless both server tokens are set, are at least 24 characters long, and differ from each other.
+- The server refuses to start without an admin token of at least 24 characters. The optional shared ingest token must also be at least 24 characters and differ from it.
+- **The admin is local-only.** Requests that arrive through the public proxy (they carry `X-Forwarded-For`) are refused on every admin endpoint, `/admin`, `/docs` and `/openapi.json`, and the admin token can't create messages that way. Caddy additionally routes only device, ingest and webhook paths ([DEPLOY_PUBLIC.md](DEPLOY_PUBLIC.md)).
+- **Audit log.** Admin and CLI actions (device and token creation/rotation/revocation, read/ack/delete, firmware downloads) are recorded with actor and client IP, never message contents. Retained for max(retention, 90) days. View it with `make audit` or in the console.
 - No credentials have defaults, in the server or the firmware. The setup access point gets a new random 10-character WPA2 password every time setup mode starts, and it is shown only on the device screen.
 - Token comparisons are constant-time. Failed authentications are rate-limited per client IP. Normal traffic is rate-limited per credential (`SMARTPAGER_RATE_LIMIT_PER_MIN`).
 
@@ -17,7 +19,9 @@
 
 - **Server binding.** The server binds to `127.0.0.1` by default, including the published port in Docker Compose. Exposing it on the LAN is an explicit choice ([SETUP.md](SETUP.md#2-make-the-server-reachable-from-the-pager)).
 - **Plain HTTP** is meant for isolated, trusted development networks only. The device token and message contents travel unencrypted.
-- **HTTPS.** The firmware checks the server certificate against the root CA PEM entered in setup (`WiFiClientSecure::setCACert`). An `https://` URL without a CA is refused. There is no "insecure" mode. Hostname checking is done by mbedTLS against the URL host.
+- **HTTPS.** The firmware always verifies the server certificate chain and hostname (mbedTLS). It trusts the built-in Let's Encrypt roots (ISRG Root X1, X2 and the Generation Y roots YE and YR), or a custom root CA provisioned in setup instead. There is no "insecure" mode.
+- **Public deployment.** Caddy terminates TLS with Let's Encrypt, sets HSTS, caps bodies at 64 KB, and passes the real client IP only to the app (uvicorn trusts `X-Forwarded-For` solely from the Caddy container's fixed address).
+- **Webhook URL tokens.** `?token=` is accepted only on `/webhooks/*` and only for ingest tokens, because URLs can end up in logs.
 
 ## Input handling
 
@@ -32,6 +36,13 @@
 - The server does not log message contents. Access logs are off (`--no-access-log`). Errors are logged with method and path only, and the IMAP connector logs counts only.
 - The firmware logs no message text, tokens or passwords. It logs cursor numbers and counts.
 - Retention: messages older than `SMARTPAGER_RETENTION_DAYS` (default 30) and expired messages become content-free tombstones. Tombstones and device-event records are hard-deleted after `SMARTPAGER_TOMBSTONE_DAYS` (default 7).
+
+## Firmware updates (OTA)
+
+- Updates are signed offline with the owner's ECDSA P-256 key (`secrets/ota_signing_key.pem`, git-ignored, mode 600). The server never sees the private key.
+- The pager verifies the signature over `smartpager-ota|version|size|sha256` with the public key compiled into its firmware. It accepts only newer versions (no replayed downgrades), checks the image's SHA-256 before switching the boot partition, and installs only when the user holds KEY on *Settings → Update*.
+- A compromised server can withhold updates but can't push firmware.
+- If the signing key is lost, pagers built with it can only be updated over USB.
 
 ## Data at rest on the pager (known limitation)
 

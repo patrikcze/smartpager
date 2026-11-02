@@ -1,0 +1,50 @@
+# SmartPager public HTTPS front end (docker compose --profile public).
+#
+# Caddy obtains and renews a Let's Encrypt certificate for SMARTPAGER_DOMAIN automatically
+# (ports 80 and 443 must reach this machine). Only what pagers and integrations need is
+# routed; the admin console, the admin API and the API docs are NOT reachable from here:
+# use http://127.0.0.1:8080 on the server, or a VPN / SSH tunnel to it.
+{
+	# compose substitutes a placeholder when unset (local tests); `make up-public` requires a real one
+	email {$ACME_EMAIL}
+	servers {
+		timeouts {
+			read_body 15s
+			read_header 10s
+			idle 2m
+		}
+	}
+}
+
+{$SMARTPAGER_DOMAIN} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+	request_body {
+		max_size 64KB
+	}
+
+	@device path_regexp device ^/api/v1/devices/[a-z0-9][a-z0-9-]{1,39}/(sync|events|firmware|firmware/image)$
+	@ingest {
+		method POST
+		path /api/v1/messages /api/v1/webhooks/generic /api/v1/webhooks/alertmanager
+	}
+	@health path /health
+
+	handle @device {
+		# long polls are held up to 25 s by the server; no response timeout is configured
+		reverse_proxy smartpager:8080
+	}
+	handle @ingest {
+		reverse_proxy smartpager:8080
+	}
+	handle @health {
+		reverse_proxy smartpager:8080
+	}
+	handle {
+		respond "Not Found" 404
+	}
+}

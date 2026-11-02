@@ -49,6 +49,15 @@ pio device monitor
 
 On first boot the device has no configuration and starts **setup mode** (see [SETUP.md](SETUP.md#3-provision-the-pager)).
 
+## Later updates: over the air
+
+Once a pager runs firmware built with your OTA key (`make ota-keygen`, then `make fw-flash`), new releases don't need USB:
+1. Bump `SMARTPAGER_VERSION` in `firmware/src/app_state.h`.
+2. Run `make ota-publish`.
+3. On the pager: Settings → Update → hold KEY.
+
+See [DEPLOY_PUBLIC.md](DEPLOY_PUBLIC.md#7-firmware-updates-over-the-air).
+
 ## Recovering a board that does not enumerate
 
 If a crash loop keeps the USB port from appearing: hold **BOOT**, tap **RST**, release **BOOT**. The ROM bootloader then enumerates and you can upload again. Press RST afterwards to run the new firmware.

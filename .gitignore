@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 backups/
+# OTA signing key (private) and the per-owner public key header
+secrets/
+firmware/include/ota_pubkey.h
 *.db
 *.db-wal
 *.db-shm

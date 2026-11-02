@@ -14,11 +14,11 @@ ID        ?= pager-1
 COMPOSE   := docker compose
 LOAD_ENV  := set -a && . ./$(ENV_FILE) && set +a
 
-.PHONY: help env install test run build up down restart logs ps health device rotate backup import-db \
+.PHONY: help env install test run build up up-public logs-caddy down ingest-token audit rotate-secrets ota-keygen ota-publish restart logs ps health device rotate backup import-db \
         demo fw-build fw-test fw-sim fw-diag fw-flash fw-monitor clean
 
 help: ## Show this help
-	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z_-]+:.*## /{printf "  \033[36m%-11s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z_-]+:.*## /{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # ------------------------------------------------------------------ configuration
 
@@ -64,8 +64,20 @@ up: $(ENV_FILE) ## Start the server container in the background and wait until h
 	  [ "$$s" = healthy ] && { echo "smartpager is healthy"; exit 0; }; sleep 2; done; \
 	echo "container did not become healthy — see 'make logs'" >&2; exit 1
 
+up-public: $(ENV_FILE) ## Start server + Caddy HTTPS (Let's Encrypt) for SMARTPAGER_DOMAIN
+	@$(LOAD_ENV) && test -n "$$SMARTPAGER_DOMAIN" -a -n "$$ACME_EMAIL" || \
+	  { echo "set SMARTPAGER_DOMAIN and ACME_EMAIL in $(ENV_FILE) first" >&2; exit 1; }
+	@$(LOAD_ENV) && [ "$${SMARTPAGER_BIND:-127.0.0.1}" = 127.0.0.1 ] || \
+	  echo "warning: SMARTPAGER_BIND=$$SMARTPAGER_BIND also exposes plain HTTP on port $${SMARTPAGER_PORT:-8080}; use 127.0.0.1 when public" >&2
+	$(MAKE) up
+	$(COMPOSE) --profile public up -d caddy
+	@$(LOAD_ENV) && echo "Caddy is requesting a certificate for $$SMARTPAGER_DOMAIN — check: make logs-caddy"
+
+logs-caddy: ## Follow Caddy (HTTPS proxy) logs
+	$(COMPOSE) --profile public logs -f --tail=100 caddy
+
 down: ## Stop the containers (data volume is kept)
-	$(COMPOSE) down
+	$(COMPOSE) --profile public --profile email down
 
 restart: ## Restart the server container
 	$(COMPOSE) restart smartpager
@@ -102,6 +114,40 @@ import-db: ## Replace the container database with DB=path/to.db (stops the serve
 	$(COMPOSE) run --rm --no-deps -v "$$snap:/import/source.db:ro" --entrypoint python smartpager -c \
 	  "import os,shutil; [os.remove(p) for p in ('/data/smartpager.db','/data/smartpager.db-wal','/data/smartpager.db-shm') if os.path.exists(p)]; shutil.copyfile('/import/source.db','/data/smartpager.db'); print('database imported')"
 	$(MAKE) up
+
+ingest-token: ## Create a named, revocable ingest token for one integration (NAME=grafana)
+	@test -n "$(NAME)" || { echo "usage: make ingest-token NAME=grafana" >&2; exit 1; }
+	$(COMPOSE) exec smartpager smartpager-admin ingest-create "$(NAME)"
+
+audit: ## Show recent admin/security events
+	$(COMPOSE) exec smartpager smartpager-admin audit --limit 40
+
+rotate-secrets: $(ENV_FILE) ## New admin + shared ingest tokens in .env (old .env kept as .env.bak-*) and restart
+	@cp -p $(ENV_FILE) $(ENV_FILE).bak-$$(date +%Y%m%d-%H%M%S) && \
+	tok() { python3 -c 'import secrets; print(secrets.token_urlsafe(32))'; }; \
+	sed -i.tmp -e "s|^SMARTPAGER_ADMIN_TOKEN=.*|SMARTPAGER_ADMIN_TOKEN=$$(tok)|" \
+	  -e "s|^SMARTPAGER_INGEST_TOKEN=..*|SMARTPAGER_INGEST_TOKEN=$$(tok)|" $(ENV_FILE) && rm -f $(ENV_FILE).tmp && \
+	chmod 600 $(ENV_FILE) && echo "rotated; update scripts that used the shared ingest token"
+	$(COMPOSE) up -d smartpager
+
+# ------------------------------------------------------------------ signed OTA updates
+
+ota-keygen: ## Create the OTA signing key (secrets/, never committed) and its firmware header
+	python3 tools/ota.py keygen
+
+ota-publish: ## Build, sign and publish the current firmware for OTA (server must be running)
+	cd firmware && $(PIO) run -e tdisplays3
+	rm -rf build/ota && python3 tools/ota.py sign firmware/.pio/build/tdisplays3/firmware.bin build/ota
+	@cid=$$($(COMPOSE) ps -q smartpager); \
+	if [ -n "$$cid" ]; then \
+	  $(COMPOSE) exec -T smartpager mkdir -p /data/firmware && \
+	  docker cp build/ota/firmware.bin "$$cid:/data/firmware/firmware.bin" && \
+	  docker cp build/ota/manifest.json "$$cid:/data/firmware/manifest.json" && \
+	  echo "published to the container; pagers offer it in Settings → Update"; \
+	else \
+	  $(LOAD_ENV) && d=$$(dirname "$${SMARTPAGER_DB:-./data/smartpager.db}")/firmware && mkdir -p "$$d" && \
+	  cp build/ota/firmware.bin build/ota/manifest.json "$$d/" && echo "published to $$d (native server)"; \
+	fi
 
 demo: $(ENV_FILE) ## Run the protocol demo (needs DEVICE_TOKEN in the environment)
 	@$(LOAD_ENV) && SMARTPAGER_URL=http://127.0.0.1:$${SMARTPAGER_PORT:-8080} scripts/demo.sh

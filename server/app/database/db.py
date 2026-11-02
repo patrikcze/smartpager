@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -69,6 +69,26 @@ MIGRATIONS: dict[int, str] = {
         PRIMARY KEY (device_id, event_id)
     );
     CREATE INDEX ix_device_events_received ON device_events(received_at);
+    """,
+    2: """
+    CREATE TABLE ingest_tokens (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        name         TEXT NOT NULL UNIQUE,
+        token_hash   TEXT NOT NULL UNIQUE,
+        created_at   TEXT NOT NULL,
+        last_used_at TEXT,
+        revoked_at   TEXT
+    );
+    CREATE TABLE audit_log (
+        id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        at     TEXT NOT NULL,
+        actor  TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target TEXT NOT NULL DEFAULT '',
+        ip     TEXT
+    );
+    CREATE INDEX ix_audit_at ON audit_log(at);
+    ALTER TABLE messages ADD COLUMN origin TEXT;
     """,
 }
 

@@ -59,11 +59,11 @@ static uint32_t dId = 0;
 // settings
 enum SettingRow {
     kRowWifi, kRowIp, kRowServer, kRowSync, kRowBrightness, kRowPoll, kRowSyncNow,
-    kRowDevice, kRowTouch, kRowMemory, kRowUptime, kRowFirmware, kRowSetup, kRowCount
+    kRowDevice, kRowTouch, kRowMemory, kRowUptime, kRowFirmware, kRowUpdate, kRowSetup, kRowCount
 };
 static const char* const kRowLabels[kRowCount] = {
     "Wi-Fi", "IP address", "Server", "Last sync", "Brightness", "Polling", "Sync now",
-    "Device", "Touch", "Memory", "Uptime", "Firmware", "Setup mode"};
+    "Device", "Touch", "Memory", "Uptime", "Firmware", "Update", "Setup mode"};
 static lv_obj_t *sList, *sRows[kRowCount], *sValues[kRowCount];
 static int sFocus = 0;
 // toast
@@ -644,6 +644,21 @@ static void refreshSettings(const DeviceStatus& st) {
     formatDuration(b, sizeof b, st.uptimeS);
     lv_label_set_text(sValues[kRowUptime], b);
     lv_label_set_text(sValues[kRowFirmware], st.firmware);
+    uint32_t updColor = col::text;
+    if (st.updateProgress >= 0) {
+        snprintf(b, sizeof b, "%s %d %%", st.updateNote, st.updateProgress);
+        updColor = col::accent;
+    } else if (st.updateVersion[0]) {
+        snprintf(b, sizeof b, "%s ready  · hold " LV_SYMBOL_RIGHT, st.updateVersion);
+        updColor = col::accent;
+    } else if (st.updateNote[0]) {
+        snprintf(b, sizeof b, "%s", st.updateNote);
+        if (strcmp(st.updateNote, "Up to date") != 0) updColor = col::warn;
+    } else {
+        snprintf(b, sizeof b, "Hold " LV_SYMBOL_RIGHT " to check");
+    }
+    lv_label_set_text(sValues[kRowUpdate], b);
+    lv_obj_set_style_text_color(sValues[kRowUpdate], C(updColor), 0);
     lv_label_set_text(sValues[kRowSetup], "Hold " LV_SYMBOL_RIGHT);
 }
 
@@ -663,6 +678,7 @@ static void settingAction(int row) {
         case kRowBrightness: ctx.onSetting(SettingAction::Brightness); break;
         case kRowPoll: ctx.onSetting(SettingAction::PollInterval); break;
         case kRowSyncNow: ctx.onSetting(SettingAction::SyncNow); break;
+        case kRowUpdate: ctx.onSetting(SettingAction::Update); break;
         case kRowSetup: ctx.onSetting(SettingAction::SetupMode); break;
         default: break;
     }

@@ -10,8 +10,10 @@
 #include <sys/time.h>
 
 #include "app_state.h"
+#include "ca_bundle.h"
 #include "messaging/policies.h"
 #include "messaging/sync_protocol.h"
+#include "network/ota.h"
 #include "storage/cache_store.h"
 
 namespace net {
@@ -20,7 +22,11 @@ namespace {
 TaskHandle_t task = nullptr;
 volatile bool saveRequested = false;
 uint32_t lastSaveMs = 0;
-String caPem;  // loaded once; empty for http://
+String caPem;  // custom CA from setup; empty = use the built-in Let's Encrypt roots
+WiFiClient plainClient;
+WiFiClientSecure tlsClient;
+volatile bool otaRequested = false;
+constexpr uint32_t kOtaCheckIntervalMs = 6 * 3600 * 1000u;
 constexpr uint32_t kHttpTimeoutMs = 10000;
 constexpr uint16_t kLongPollS = 20;      // server holds the request up to this long
 constexpr size_t kMaxResponse = 48 * 1024;
@@ -52,24 +58,29 @@ void persistIfNeeded(bool force) {
     if (!n || !cache::commit(n)) log_w("cache save failed");  // flash write without the lock
 }
 
-// One HTTP exchange. `body` null = GET. Response kept in `out` (bounded).
-Result request(const char* method, const String& path, const String* body, uint32_t timeoutMs, String& out,
-               int& code) {
-    static WiFiClient plain;
-    static WiFiClientSecure tls;
+}  // namespace
+
+bool beginRequest(HTTPClient& http, const String& path, uint32_t timeoutMs) {
     const char* base = g_config.serverUrl;
     bool https = strncmp(base, "https://", 8) == 0;
-    if (https) {
-        if (caPem.isEmpty()) return Result::Protocol;  // never connect to TLS without a trust anchor
-        tls.setCACert(caPem.c_str());
-    }
-    HTTPClient http;
+    // Certificates are always verified (chain + hostname); there is no insecure mode.
+    if (https) tlsClient.setCACert(caPem.length() ? caPem.c_str() : kLetsEncryptRoots);
     http.setReuse(true);
     http.setTimeout(timeoutMs);
     http.setConnectTimeout(5000);
     String url = String(base) + path;
-    if (!(https ? http.begin(tls, url) : http.begin(plain, url))) return Result::Protocol;
+    if (!(https ? http.begin(tlsClient, url) : http.begin(plainClient, url))) return false;
     http.addHeader("Authorization", String("Bearer ") + g_config.token);
+    return true;
+}
+
+namespace {
+
+// One HTTP exchange. `body` null = GET. Response kept in `out` (bounded).
+Result request(const char* method, const String& path, const String* body, uint32_t timeoutMs, String& out,
+               int& code) {
+    HTTPClient http;
+    if (!beginRequest(http, path, timeoutMs)) return Result::Protocol;
     http.addHeader("Accept", "application/json");
     if (body) http.addHeader("Content-Type", "application/json");
     code = body ? http.sendRequest(method, *body) : http.GET();
@@ -119,6 +130,10 @@ Result uploadEvents(uint32_t ackCursor, bool alwaysSendCursor) {
         st["psram"] = ESP.getFreePsram();
         st["uptime"] = millis() / 1000;
         st["cache_writes"] = cache::writes();
+        appLock();
+        if (g_status.updateNote[0]) st["update"] = g_status.updateNote;
+        if (g_status.updateVersion[0]) st["update_version"] = g_status.updateVersion;
+        appUnlock();
         String body;
         serializeJson(doc, body);
         String resp;
@@ -240,6 +255,7 @@ void taskMain(void*) {
     // Cap at 30 s: a pager should notice a recovered server quickly (measured on hardware:
     // with a 5 min cap, delivery after a 40 s outage took 52 s). 2 requests/min while down.
     sp::Backoff backoff(2000, 30 * 1000);
+    uint32_t nextOtaCheckMs = 0;  // 0 = check after the first successful sync
     uint32_t nextSyncMs = 0;
     uint32_t wifiDownSince = millis();
     bool lastOk = false;
@@ -271,6 +287,15 @@ void taskMain(void*) {
                 r = uploadEvents(cursor, false);
             }
             lastOk = r == Result::Ok;
+            // Firmware updates: an explicit request from Settings, or a periodic check.
+            if (otaRequested) {
+                otaRequested = false;
+                ota::checkOrInstall();
+            } else if (lastOk && ota::enabled() &&
+                       (nextOtaCheckMs == 0 || static_cast<int32_t>(millis() - nextOtaCheckMs) >= 0)) {
+                ota::check();
+                nextOtaCheckMs = millis() + kOtaCheckIntervalMs;
+            }
             if (lastOk) {
                 backoff.reset();
                 // After a long poll returns we can immediately poll again; otherwise wait.
@@ -294,6 +319,16 @@ void start() { xTaskCreatePinnedToCore(taskMain, "net", 12 * 1024, nullptr, 2, &
 
 void kick() {
     if (task) xTaskNotifyGive(task);
+}
+
+void requestOta() {
+    otaRequested = true;
+    kick();
+}
+
+void saveNow() {
+    saveRequested = true;
+    persistIfNeeded(true);
 }
 
 void requestSave() { saveRequested = true; }

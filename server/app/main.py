@@ -11,12 +11,13 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__
-from .api.deps import RateLimiter
+from .api.deps import RateLimiter, via_proxy
 from .api.routes import router
 from .config import Settings
 from .database.db import connect, migrate
 from .integrations import webhooks
 from .services import messages as svc
+from .services import security
 from .services.notifier import ChangeNotifier
 
 log = logging.getLogger("smartpager")
@@ -30,7 +31,9 @@ async def _purge_loop(app: FastAPI) -> None:
             def run() -> dict[str, int]:
                 conn = connect(s.db_path)
                 try:
-                    return svc.purge(conn, s.retention_days, s.tombstone_days)
+                    stats = svc.purge(conn, s.retention_days, s.tombstone_days)
+                    stats["audit"] = security.purge_audit(conn, max(s.retention_days, 90))
+                    return stats
                 finally:
                     conn.close()
             stats = await run_in_threadpool(run)
@@ -97,8 +100,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(webhooks.router)
     app.add_middleware(BodySizeLimit, max_bytes=settings.max_request_bytes)
 
+    local_only = ("/admin", "/docs", "/openapi.json", "/redoc")
+
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
+        # The console and API docs exist only on the local port, never through the public proxy.
+        if request.url.path.startswith(local_only) and via_proxy(request) and not settings.admin_via_proxy:
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")

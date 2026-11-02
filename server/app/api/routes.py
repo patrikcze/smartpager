@@ -1,11 +1,15 @@
 """REST API v1."""
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import time
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
+from pydantic import ValidationError
 
 from ..models.schemas import (
     DeviceCreate,
@@ -13,6 +17,11 @@ from ..models.schemas import (
     DeviceEventsRequest,
     DeviceEventsResponse,
     DeviceInfo,
+    AuditEntry,
+    FirmwareManifest,
+    IngestTokenCreate,
+    IngestTokenCreated,
+    IngestTokenInfo,
     Message,
     MessageCreate,
     MessageCreated,
@@ -21,7 +30,8 @@ from ..models.schemas import (
     SyncResponse,
 )
 from ..services import messages as svc
-from .deps import get_conn, require_admin, require_device, require_ingest
+from ..services import security
+from .deps import client_ip, get_conn, require_admin, require_device, require_ingest
 
 router = APIRouter(prefix="/api/v1")
 
@@ -30,13 +40,17 @@ def _notify(request: Request) -> None:
     request.app.state.notifier.notify()
 
 
+def _audit(conn: sqlite3.Connection, request: Request, actor: str, action: str, target: str = "") -> None:
+    security.audit(conn, actor, action, target, client_ip(request))
+
+
 # ---------------------------------------------------------------- messages (admin / ingest)
 
 @router.post("/messages", response_model=MessageCreated, status_code=status.HTTP_201_CREATED)
 def create_message(body: MessageCreate, request: Request, response: Response,
                    idempotency_key: str | None = Header(default=None, max_length=100),
-                   _: str = Depends(require_ingest), conn: sqlite3.Connection = Depends(get_conn)):
-    row, duplicate = svc.create_message(conn, body, idempotency_key)
+                   actor: str = Depends(require_ingest), conn: sqlite3.Connection = Depends(get_conn)):
+    row, duplicate = svc.create_message(conn, body, idempotency_key, origin=actor)
     if duplicate:
         response.status_code = status.HTTP_200_OK
     else:
@@ -69,28 +83,31 @@ def get_message(message_id: int, _: str = Depends(require_admin),
 
 
 @router.post("/messages/{message_id}/read", response_model=Message)
-def mark_read(message_id: int, request: Request, _: str = Depends(require_admin),
+def mark_read(message_id: int, request: Request, actor: str = Depends(require_admin),
               conn: sqlite3.Connection = Depends(get_conn)):
     _existing(conn, message_id)
     row = svc.mark_message(conn, message_id, "read")
+    _audit(conn, request, actor, "message.read", f"message:{message_id}")
     _notify(request)
     return svc.row_to_message(row)
 
 
 @router.post("/messages/{message_id}/ack", response_model=Message)
-def mark_ack(message_id: int, request: Request, _: str = Depends(require_admin),
+def mark_ack(message_id: int, request: Request, actor: str = Depends(require_admin),
              conn: sqlite3.Connection = Depends(get_conn)):
     _existing(conn, message_id)
     row = svc.mark_message(conn, message_id, "ack")
+    _audit(conn, request, actor, "message.ack", f"message:{message_id}")
     _notify(request)
     return svc.row_to_message(row)
 
 
 @router.delete("/messages/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_message(message_id: int, request: Request, _: str = Depends(require_admin),
+def delete_message(message_id: int, request: Request, actor: str = Depends(require_admin),
                    conn: sqlite3.Connection = Depends(get_conn)):
     if not svc.delete_message(conn, message_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "message not found")
+    _audit(conn, request, actor, "message.delete", f"message:{message_id}")
     _notify(request)
 
 
@@ -102,21 +119,23 @@ def list_devices(_: str = Depends(require_admin), conn: sqlite3.Connection = Dep
 
 
 @router.post("/devices", response_model=DeviceCreated, status_code=status.HTTP_201_CREATED)
-def create_device(body: DeviceCreate, _: str = Depends(require_admin),
+def create_device(body: DeviceCreate, request: Request, actor: str = Depends(require_admin),
                   conn: sqlite3.Connection = Depends(get_conn)):
     try:
         row, token = svc.create_device(conn, body.id, body.name)
     except sqlite3.IntegrityError:
         raise HTTPException(status.HTTP_409_CONFLICT, "device already exists")
+    _audit(conn, request, actor, "device.create", f"device:{body.id}")
     return DeviceCreated(device=svc.device_to_dict(row), token=token)
 
 
 @router.post("/devices/{device_id}/token", response_model=DeviceCreated)
-def rotate_token(device_id: str, _: str = Depends(require_admin),
+def rotate_token(device_id: str, request: Request, actor: str = Depends(require_admin),
                  conn: sqlite3.Connection = Depends(get_conn)):
     token = svc.rotate_device_token(conn, device_id)
     if token is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "device not found")
+    _audit(conn, request, actor, "device.rotate_token", f"device:{device_id}")
     row = next(r for r in svc.list_devices(conn) if r["id"] == device_id)
     return DeviceCreated(device=svc.device_to_dict(row), token=token)
 
@@ -159,3 +178,68 @@ def device_events(device_id: str, body: DeviceEventsRequest, request: Request,
     if result.accepted:
         _notify(request)
     return result
+
+
+# ---------------------------------------------------------------- integration tokens & audit (admin)
+
+@router.get("/tokens", response_model=list[IngestTokenInfo])
+def list_tokens(_: str = Depends(require_admin), conn: sqlite3.Connection = Depends(get_conn)):
+    return [security.token_to_dict(r) for r in security.list_ingest_tokens(conn)]
+
+
+@router.post("/tokens", response_model=IngestTokenCreated, status_code=status.HTTP_201_CREATED)
+def create_token(body: IngestTokenCreate, request: Request, actor: str = Depends(require_admin),
+                 conn: sqlite3.Connection = Depends(get_conn)):
+    """Create a named ingest token for one integration. The token is returned only here."""
+    try:
+        row, token = security.create_ingest_token(conn, body.name)
+    except sqlite3.IntegrityError:
+        raise HTTPException(status.HTTP_409_CONFLICT, "a token with this name exists")
+    _audit(conn, request, actor, "token.create", f"token:{body.name}")
+    return IngestTokenCreated(token_info=security.token_to_dict(row), token=token)
+
+
+@router.delete("/tokens/{token_id}", response_model=IngestTokenInfo)
+def revoke_token(token_id: int, request: Request, actor: str = Depends(require_admin),
+                 conn: sqlite3.Connection = Depends(get_conn)):
+    row = security.revoke_ingest_token(conn, token_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "token not found")
+    _audit(conn, request, actor, "token.revoke", f"token:{row['name']}")
+    return security.token_to_dict(row)
+
+
+@router.get("/audit", response_model=list[AuditEntry])
+def audit_log(limit: int = Query(default=100, ge=1, le=1000), _: str = Depends(require_admin),
+              conn: sqlite3.Connection = Depends(get_conn)):
+    return security.list_audit(conn, limit)
+
+
+# ---------------------------------------------------------------- signed OTA firmware (device)
+
+def _manifest(request: Request) -> tuple[FirmwareManifest, str]:
+    """Load the published manifest. The server only distributes; the device verifies the
+    signature with its built-in public key, so a compromised server can't push firmware."""
+    base = request.app.state.settings.firmware_dir
+    image = os.path.join(base, "firmware.bin")
+    try:
+        with open(os.path.join(base, "manifest.json"), encoding="utf-8") as f:
+            manifest = FirmwareManifest.model_validate(json.load(f))
+    except (OSError, ValueError, ValidationError):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no firmware published")
+    if not os.path.isfile(image) or os.path.getsize(image) != manifest.size:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no firmware published")
+    return manifest, image
+
+
+@router.get("/devices/{device_id}/firmware", response_model=FirmwareManifest)
+def firmware_manifest(device_id: str, request: Request, device: sqlite3.Row = Depends(require_device)):
+    return _manifest(request)[0]
+
+
+@router.get("/devices/{device_id}/firmware/image")
+def firmware_image(device_id: str, request: Request, device: sqlite3.Row = Depends(require_device),
+                   conn: sqlite3.Connection = Depends(get_conn)):
+    manifest, image = _manifest(request)
+    _audit(conn, request, f"device:{device_id}", "firmware.download", f"version:{manifest.version}")
+    return FileResponse(image, media_type="application/octet-stream")

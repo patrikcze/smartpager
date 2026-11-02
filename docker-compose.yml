@@ -6,8 +6,14 @@ services:
     env_file: .env
     environment:
       SMARTPAGER_DB: /data/smartpager.db  # overrides the native path from .env
+      # Trust X-Forwarded-For only from the Caddy container (static address below), so
+      # rate limiting and the audit log see real client addresses behind the proxy.
+      FORWARDED_ALLOW_IPS: 172.30.0.2
     volumes:
       - smartpager-data:/data
+    networks:
+      smartpager:
+        ipv4_address: 172.30.0.10
     # SMARTPAGER_BIND (in .env) defaults to localhost. Set it to 0.0.0.0 so the pager can reach
     # the server over the LAN (trusted network only), or put an HTTPS reverse proxy in front.
     ports:
@@ -18,6 +24,35 @@ services:
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
+
+  # Public HTTPS front end with automatic Let's Encrypt: `docker compose --profile public up -d`
+  # Needs SMARTPAGER_DOMAIN and ACME_EMAIL in .env and ports 80/443 forwarded to this machine.
+  caddy:
+    profiles: [public]
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    depends_on: [smartpager]
+    environment:  # only what Caddy needs; never hand it the API secrets in .env
+      SMARTPAGER_DOMAIN: ${SMARTPAGER_DOMAIN:-localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-nobody@localhost.invalid}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      smartpager:
+        ipv4_address: 172.30.0.2
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
 
   # Optional e-mail connector: `docker compose --profile email up -d`
   imap:
@@ -30,10 +65,19 @@ services:
       SMARTPAGER_URL: http://smartpager:8080
     command: ["python", "-m", "app.integrations.imap_connector"]
     depends_on: [smartpager]
+    networks: [smartpager]
     read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
 
+networks:
+  smartpager:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
 volumes:
   smartpager-data:
+  caddy-data:
+  caddy-config:

@@ -90,6 +90,7 @@ class Message(BaseModel):
     acknowledged_at: str | None
     deleted_at: str | None
     metadata: dict[str, Any]
+    origin: str | None = None  # which credential created it: "admin", "ingest", "token:<name>"
 
 
 class MessageCreated(BaseModel):
@@ -178,3 +179,40 @@ class DeviceInfo(BaseModel):
 class DeviceCreated(BaseModel):
     device: DeviceInfo
     token: str
+
+
+class IngestTokenCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=2, max_length=40, pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._-]+$")
+
+
+class IngestTokenInfo(BaseModel):
+    id: int
+    name: str
+    created_at: str
+    last_used_at: str | None
+    revoked_at: str | None
+
+
+class IngestTokenCreated(BaseModel):
+    token_info: IngestTokenInfo
+    token: str
+
+
+class AuditEntry(BaseModel):
+    id: int
+    at: str
+    actor: str
+    action: str
+    target: str
+    ip: str | None
+
+
+class FirmwareManifest(BaseModel):
+    """Signed OTA manifest. The signature (ECDSA P-256 / SHA-256, DER, base64) covers
+    the string "smartpager-ota|<version>|<size>|<sha256>" so the version can't be altered."""
+    model_config = ConfigDict(extra="ignore")
+    version: str = Field(pattern=r"^\d{1,3}\.\d{1,3}\.\d{1,3}$")
+    size: int = Field(gt=0, le=6_500_000)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    signature: str = Field(min_length=16, max_length=200)

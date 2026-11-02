@@ -37,9 +37,12 @@ struct DeviceStatus {
     uint32_t uptimeS = 0;
     uint32_t freeHeap = 0;
     uint32_t freePsram = 0;
+    char updateVersion[16] = {};  // verified newer firmware available
+    char updateNote[24] = {};     // "Up to date", "Available", "Installing", errors…
+    int8_t updateProgress = -1;   // 0..100 while installing
 };
 
-enum class SettingAction : uint8_t { Brightness, PollInterval, SyncNow, SetupMode };
+enum class SettingAction : uint8_t { Brightness, PollInterval, SyncNow, Update, SetupMode };
 
 struct UiContext {
     MessageStore* store;

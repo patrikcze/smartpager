@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "messaging/message_store.h"
+#include "messaging/ota_manifest.h"
 #include "messaging/policies.h"
 #include "messaging/sync_protocol.h"
 #include "ui/format.h"
@@ -338,6 +339,72 @@ void test_preview_title_and_sources() {
     TEST_ASSERT_EQUAL_STRING("Critical", priorityLabel(7));
 }
 
+// ------------------------------------------------------------- OTA manifest
+
+void test_version_compare() {
+    int r;
+    TEST_ASSERT_TRUE(compareVersions("0.2.0", "0.1.9", r)); TEST_ASSERT_GREATER_THAN(0, r);
+    TEST_ASSERT_TRUE(compareVersions("0.10.0", "0.9.0", r)); TEST_ASSERT_GREATER_THAN(0, r);  // numeric, not lexical
+    TEST_ASSERT_TRUE(compareVersions("1.0.0", "1.0.0", r)); TEST_ASSERT_EQUAL(0, r);
+    TEST_ASSERT_TRUE(compareVersions("0.1.0", "0.2.0", r)); TEST_ASSERT_LESS_THAN(0, r);
+    TEST_ASSERT_FALSE(compareVersions("0.2", "0.1.0", r));
+    TEST_ASSERT_FALSE(compareVersions("0.2.0-rc1", "0.1.0", r));
+    TEST_ASSERT_FALSE(compareVersions("1.2.3.4", "0.1.0", r));
+    TEST_ASSERT_FALSE(compareVersions("9999.0.0", "0.1.0", r));
+}
+
+void test_base64_decode() {
+    uint8_t out[16];
+    TEST_ASSERT_EQUAL(5, base64Decode("aGVsbG8=", out, sizeof out));
+    TEST_ASSERT_EQUAL_MEMORY("hello", out, 5);
+    TEST_ASSERT_EQUAL(4, base64Decode("aGVsbA==", out, sizeof out));
+    TEST_ASSERT_EQUAL(6, base64Decode("aGVsbG8h", out, sizeof out));
+    TEST_ASSERT_EQUAL(0, base64Decode("aGVsbG8", out, sizeof out));    // bad length
+    TEST_ASSERT_EQUAL(0, base64Decode("aGV$bG8h", out, sizeof out));   // bad char
+    TEST_ASSERT_EQUAL(0, base64Decode("a=Vsbg==", out, sizeof out));   // misplaced padding
+    TEST_ASSERT_EQUAL(0, base64Decode("aGVsbG8h", out, 3));            // overflow
+}
+
+static const char* kManifest = R"({"version":"0.2.1","size":1215693,
+  "sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "signature":"MEUCIQCs7JiYQbTzqp8fMJ8QeUuS4sF1ZfC7w0y0b3n7bX5WCAIgL2u+0x0d9pVtH1uBz2Qm9i3l3xJm0nJp1cXw3oPqYkE="})";
+
+void test_manifest_parse_and_signed_message() {
+    JsonDocument doc;
+    deserializeJson(doc, kManifest);
+    OtaManifest m;
+    TEST_ASSERT_TRUE(parseOtaManifest(doc, m));
+    TEST_ASSERT_EQUAL_STRING("0.2.1", m.version);
+    TEST_ASSERT_EQUAL(1215693u, m.size);
+    TEST_ASSERT_EQUAL_HEX8(0x01, m.sha256[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xef, m.sha256[31]);
+    TEST_ASSERT_EQUAL(71, m.signatureLen);
+    char msg[128];
+    TEST_ASSERT_GREATER_THAN(0, otaSignedMessage(m, msg, sizeof msg));
+    TEST_ASSERT_EQUAL_STRING(
+        "smartpager-ota|0.2.1|1215693|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", msg);
+    TEST_ASSERT_EQUAL(0, otaSignedMessage(m, msg, 20));
+}
+
+void test_manifest_rejects_bad_input() {
+    const char* bad[] = {
+        R"({"version":"latest","size":10,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","signature":"aGVsbG8gd29ybGQh"})",
+        R"({"version":"0.2.1","size":0,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","signature":"aGVsbG8gd29ybGQh"})",
+        R"({"version":"0.2.1","size":9999999,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","signature":"aGVsbG8gd29ybGQh"})",
+        R"({"version":"0.2.1","size":10,"sha256":"0123","signature":"aGVsbG8gd29ybGQh"})",
+        R"({"version":"0.2.1","size":10,"sha256":"0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef","signature":"aGVsbG8gd29ybGQh"})",
+        R"({"version":"0.2.1","size":10,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","signature":"!!"})",
+        R"({"version":"0.2.1","size":"10","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","signature":"aGVsbG8gd29ybGQh"})",
+        R"({"size":10})",
+    };
+    for (const char* j : bad) {
+        JsonDocument doc;
+        deserializeJson(doc, j);
+        OtaManifest m;
+        TEST_ASSERT_FALSE_MESSAGE(parseOtaManifest(doc, m), j);
+    }
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_insert_sorted_newest_first);
@@ -361,5 +428,9 @@ int main(int, char**) {
     RUN_TEST(test_button_suppressed_press_is_ignored);
     RUN_TEST(test_format_age);
     RUN_TEST(test_preview_title_and_sources);
+    RUN_TEST(test_version_compare);
+    RUN_TEST(test_base64_decode);
+    RUN_TEST(test_manifest_parse_and_signed_message);
+    RUN_TEST(test_manifest_rejects_bad_input);
     return UNITY_END();
 }

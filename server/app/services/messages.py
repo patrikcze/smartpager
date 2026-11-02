@@ -43,14 +43,14 @@ def row_to_message(row: sqlite3.Row) -> Message:
         received_at=row["received_at"], expires_at=row["expires_at"],
         delivered_at=row["delivered_at"], read_at=row["read_at"],
         acknowledged_at=row["acknowledged_at"], deleted_at=row["deleted_at"],
-        metadata=json.loads(row["metadata"]),
+        metadata=json.loads(row["metadata"]), origin=row["origin"],
     )
 
 
 # ---------------------------------------------------------------- messages
 
 def create_message(conn: sqlite3.Connection, data: MessageCreate,
-                   idempotency_key: str | None = None) -> tuple[sqlite3.Row, bool]:
+                   idempotency_key: str | None = None, origin: str | None = None) -> tuple[sqlite3.Row, bool]:
     """Insert a message. Returns (row, duplicate). Idempotent on (source, external_id)."""
     external_id = data.external_id or (f"idem:{idempotency_key}" if idempotency_key else None)
     now = utcnow()
@@ -65,12 +65,12 @@ def create_message(conn: sqlite3.Connection, data: MessageCreate,
         seq = next_seq(conn)
         row = conn.execute(
             """INSERT INTO messages(seq, source, external_id, sender, subject, body, priority,
-                                    created_at, received_at, expires_at, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *""",
+                                    created_at, received_at, expires_at, metadata, origin)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *""",
             (seq, data.source.value, external_id, data.sender, data.subject, data.body,
              PRIORITY_TO_INT[data.priority], iso(data.created_at or now), iso(now),
              iso(data.expires_at) if data.expires_at else None,
-             json.dumps(data.metadata, ensure_ascii=False)),
+             json.dumps(data.metadata, ensure_ascii=False), origin),
         ).fetchone()
     return row, False
 
