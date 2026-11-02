@@ -64,7 +64,20 @@ curl -fsSL https://get.docker.com | sudo sh      # Docker Engine + compose plugi
 sudo usermod -aG docker $USER                    # then log out and back in
 ```
 
-On Oracle Linux, install Docker Engine following Docker's documentation for RHEL‑compatible systems, then `sudo dnf install -y git make python3`.
+On **Oracle Linux 8/9** (the default user is `opc`):
+
+```bash
+sudo dnf -y update
+sudo dnf install -y git make python3 dnf-utils
+sudo dnf remove -y podman buildah runc 2>/dev/null || true      # conflicts with Docker's containerd, if present
+sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER                                     # then log out and back in
+docker compose version                                            # check
+```
+
+For automatic security updates on Oracle Linux, run `sudo dnf install -y dnf-automatic`, set `apply_updates = yes` in `/etc/dnf/automatic.conf`, then `sudo systemctl enable --now dnf-automatic.timer`.
 
 **Open ports 80 and 443.** Let's Encrypt needs port 80 to verify the domain. Pagers and scripts use 443. Cloud providers usually block both **twice**, and both layers must allow them:
 
@@ -77,9 +90,10 @@ On Oracle Linux, install Docker Engine following Docker's documentation for RHEL
    sudo ufw allow 80/tcp && sudo ufw allow 443/tcp
    ```
    ```bash
-   # Oracle Linux / RHEL (firewalld)
+   # Oracle Linux / Rocky / RHEL (firewalld)
    sudo firewall-cmd --permanent --add-service=http --add-service=https && sudo firewall-cmd --reload
    ```
+   If this says `firewall-cmd: command not found`, the image has no firewalld (the package is called `firewalld`, not `firewall-cmd`). Check `sudo iptables -S INPUT`: if it shows only `-P INPUT ACCEPT`, the VM itself blocks nothing and the cloud firewall is your only layer, so you can skip this step.
    Oracle's Ubuntu images ship their own `iptables` rules that reject everything except SSH. If HTTPS doesn't connect later, insert accept rules before the final REJECT, and persist them:
    ```bash
    sudo iptables -I INPUT 5 -p tcp --dport 80 -j ACCEPT && sudo iptables -I INPUT 5 -p tcp --dport 443 -j ACCEPT && sudo netfilter-persistent save
