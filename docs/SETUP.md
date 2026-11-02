@@ -19,24 +19,31 @@ Tests:
 cd server && .venv/bin/pytest -q
 ```
 
-### Docker
+### Docker (production)
 
 ```bash
-cp .env.example .env    # fill in both tokens
-docker compose up -d --build
+make env        # .env with fresh random tokens; never overwrites an existing one
+make up         # build image, start container, wait for the health check
+make device ID=pager-1
 ```
 
-```bash
-docker compose exec smartpager smartpager-admin device-create pager-1 --name "Desk"
-```
+| Target | What it does |
+|---|---|
+| `make logs` / `make ps` / `make health` | follow logs, container status, `/health` |
+| `make backup` | consistent SQLite snapshot into `./backups/` (git-ignored, mode 600) |
+| `make import-db DB=path.db` | replace the container database, e.g. to move from a native install |
+| `make rotate ID=pager-1` | issue a new device token |
+| `make down` | stop. The `smartpager-data` volume is kept |
 
-The database lives in the `smartpager-data` volume. The container runs as a non-root user with a read-only root filesystem.
+- **Security:** the container runs as a non-root user (uid 10001) with a read-only root filesystem, no Linux capabilities, and `no-new-privileges`.
+- **Restarts:** `restart: unless-stopped` brings it back after reboots, as long as Docker itself starts at login (Docker Desktop → Settings → General).
+- **Docker Desktop on macOS:** client addresses are NATed, so `last_ip` in `/admin` shows `192.168.65.1` rather than the pager's real IP.
 
 ## 2. Make the server reachable from the pager
 
 The default binding is **localhost only**, so the pager on Wi-Fi can't reach it. Pick one of these:
 
-- **Trusted home LAN, plain HTTP** (development only). Start uvicorn with `--host 0.0.0.0`, or set `"0.0.0.0:8080:8080"` in `docker-compose.yml`. Allow the port in the macOS firewall, then use `http://<mac-ip>:8080` as the server URL. Messages and the device token then cross your Wi-Fi unencrypted.
+- **Trusted home LAN, plain HTTP** (development only). Set `SMARTPAGER_BIND=0.0.0.0` in `.env` (used by both `make run` and `make up`). Allow the port in the macOS firewall, then use `http://<mac-ip>:8080` as the server URL. Messages and the device token then cross your Wi-Fi unencrypted.
 - **HTTPS (recommended).** Put the server behind Caddy, nginx or Traefik with a real certificate, for example Let's Encrypt via a DNS challenge. Then enter `https://pager.example.com` and paste the issuing **root CA** PEM into the setup portal. For Let's Encrypt that is *ISRG Root X1*. The pager checks the chain and refuses `https://` without a CA. Certificate checking is never turned off.
 
 ## 3. Provision the pager

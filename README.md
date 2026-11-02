@@ -19,14 +19,13 @@ tools/      gen_fonts.sh — regenerates the Inter/Czech LVGL fonts
 ## Quick start
 
 ```bash
-cd server && uv venv --python 3.13 .venv && uv pip install -e '.[dev]' && .venv/bin/pytest -q
-cp ../.env.example ../.env    # add two secrets: .venv/bin/python -m app.cli token
-set -a; source ../.env; set +a
-.venv/bin/python -m app.cli device-create pager-1          # prints the device token once
-.venv/bin/uvicorn --factory app.main:create_app --host 127.0.0.1 --port 8080
+make env       # creates .env with random admin/ingest tokens (mode 600, git-ignored)
+make up        # builds the Docker image, starts the server, waits until healthy
+make device    # registers pager-1 and prints its token once
+make health
 ```
 
-Then open <http://127.0.0.1:8080/admin>, or run `scripts/demo.sh`. For Docker, LAN exposure and HTTPS see [docs/SETUP.md](docs/SETUP.md). For the device see [docs/FLASHING.md](docs/FLASHING.md).
+Then open <http://127.0.0.1:8080/admin> and paste the admin token (`grep ADMIN .env`). `make` lists every target. They cover native runs (`make install test run`), backups (`make backup`), database import, and firmware build/flash. To let the pager reach the server over the LAN, set `SMARTPAGER_BIND=0.0.0.0` in `.env` (trusted network) or put HTTPS in front. See [docs/SETUP.md](docs/SETUP.md) and [docs/FLASHING.md](docs/FLASHING.md).
 
 ---
 
@@ -73,6 +72,7 @@ Then open <http://127.0.0.1:8080/admin>, or run `scripts/demo.sh`. For Docker, L
 | **Milestone 3, end-to-end:** API → device delivery incl. flash save and cursor confirmation: **1.1 s, 2.0 s, 6.8 s** (RSSI −83 dBm) | **verified** |
 | Cache survives firmware update and reset (`cache=loaded messages=8 cursor=13` at boot) | **verified** |
 | Read/ack made with the device buttons reached the server (5 messages read, 4 acknowledged; delivered, read and acked recorded separately) | **verified** |
+| Docker: `make build` / `make up`, container healthy, data imported, pager synced against it (delivery ~2 s), runs non-root with a read-only root filesystem | **verified** |
 | Server outage 40 s: UI task and device kept running (no reboot, heap stable ~174–180 KB). Delivery after restart **52 s → 14.7 s** after capping backoff at 30 s | **verified** |
 
 ### Firmware memory (measured at build time)
@@ -98,8 +98,7 @@ Measured at runtime on the device: **free heap 174–180 KB, free PSRAM 8.27 MB*
    - watchdog behaviour under a real hang
    - Wi-Fi loss/reconnect (only server outages were tested)
    - long-running memory behaviour: free heap went 180 → 174 → 170 KB over the first ~5 minutes of use. That is too short to tell a leak from LVGL settling. Watch `heap` in `/admin` over a day.
-2. **Docker image:** the Docker daemon was not running on this Mac, so `docker compose build` was not executed.
-3. **IMAP** against a live mailbox, and HTTPS against a real certificate: no account or certificate was available.
+2. **IMAP** against a live mailbox, and HTTPS against a real certificate: no account or certificate was available.
 
 ### Known limitations
 

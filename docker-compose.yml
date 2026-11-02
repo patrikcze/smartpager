@@ -8,10 +8,10 @@ services:
       SMARTPAGER_DB: /data/smartpager.db  # overrides the native path from .env
     volumes:
       - smartpager-data:/data
-    # Bound to localhost by default. To let the pager reach it over the LAN, change to
-    # "0.0.0.0:8080:8080" (trusted network only) or put it behind an HTTPS reverse proxy.
+    # SMARTPAGER_BIND (in .env) defaults to localhost. Set it to 0.0.0.0 so the pager can reach
+    # the server over the LAN (trusted network only), or put an HTTPS reverse proxy in front.
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${SMARTPAGER_BIND:-127.0.0.1}:${SMARTPAGER_PORT:-8080}:8080"
     read_only: true
     tmpfs:
       - /tmp
