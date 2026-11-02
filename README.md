@@ -18,12 +18,15 @@ A Wi-Fi pager built from a **LILYGO T-Display-S3** (ESP32-S3, 1.9" 320×170 scre
 **Follow [docs/GUIDE.md](docs/GUIDE.md).** It walks through running the server securely over HTTPS and connecting your pagers, step by step. The short version:
 
 ```bash
-make env                 # create .env with random secrets (git-ignored); then set your domain in it
-make ota-keygen          # create your firmware-signing key (back it up)
-make up-public           # start the server behind HTTPS (Caddy + Let's Encrypt)
-make device ID=pager-1   # register a pager; prints its token once
-make fw-flash            # flash the pager over USB, then enter Wi-Fi, URL and token in its setup page
+# on the server (Linux with Docker, ports 80/443 open, DNS pointing at it)
+make env                           # .env with random secrets (git-ignored); then set SMARTPAGER_DOMAIN in it
+make up-public                     # start behind HTTPS: Caddy obtains the Let's Encrypt certificate itself
+make device ID=pager-1             # register a pager; prints its token once
 make ingest-token NAME=my-script   # one token per script or service that sends messages
+
+# on your own computer
+make ota-keygen                    # firmware-signing key (stays here; back it up)
+make fw-flash                      # flash the pager over USB, then enter Wi-Fi, https URL and token in its setup page
 ```
 
 Send a message:

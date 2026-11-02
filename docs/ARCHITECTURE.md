@@ -58,7 +58,7 @@ MQTT would add a broker and buy nothing for a single-user deployment.
   - It never touches the network.
 - **Network task (core 0, 12 KB stack).** Runs a state machine: Wi-Fi up → sync (long poll) → upload events → wait.
   - Network errors back off exponentially with jitter, from 2 s up to 30 s (2 requests/min while the server is down). An authentication error waits 5 min.
-  - Signed firmware updates are checked after the first sync and every 6 h, and installed only on user request (see [GUIDE.md](GUIDE.md#8-firmware-updates)).
+  - Signed firmware updates are checked after the first sync and every 6 h, and installed only on user request (see [GUIDE.md](GUIDE.md#9-firmware-updates)).
   - New messages are announced to the UI through a FreeRTOS queue, which triggers the banner and wakes the backlight.
   - User actions (read, ack, "sync now") call `net::kick()` to wake the task.
 - **Shared state:** `g_store` and `g_status` behind one mutex. Flash writes happen **outside** the lock: the store is serialized under the lock, then written without it.

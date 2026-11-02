@@ -53,9 +53,9 @@ make fw-diag            # flash the hardware test image (colour bars, buttons, t
 Quick to set up, but **not encrypted**: messages and the device token cross the network readable by anyone who can capture traffic. Use it on a trusted network for testing only.
 
 1. Set `SMARTPAGER_BIND=0.0.0.0` in `.env`, run `make up`, and allow the port in the firewall.
-2. Provision the pager with `http://<computer-LAN-IP>:8080` ([GUIDE.md §5.3](GUIDE.md#53-enter-the-settings)).
+2. Provision the pager with `http://<computer-LAN-IP>:8080` ([GUIDE.md §6.3](GUIDE.md#63-enter-the-settings)).
 
-When you move to HTTPS ([GUIDE.md §4](GUIDE.md#4-start-it-with-https)):
+When you move to HTTPS ([GUIDE.md §5](GUIDE.md#5-start-it-and-obtain-the-certificate)):
 - set `SMARTPAGER_BIND=127.0.0.1` again,
 - rotate the tokens (`make rotate-secrets`, `make rotate ID=…`), and
 - re-provision the pager with the `https://` URL.

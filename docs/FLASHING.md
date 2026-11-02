@@ -47,7 +47,7 @@ pio run -e tdisplays3 -t upload
 pio device monitor
 ```
 
-On first boot the device has no configuration and starts **setup mode** (see [GUIDE.md §5.3](GUIDE.md#53-enter-the-settings)).
+On first boot the device has no configuration and starts **setup mode** (see [GUIDE.md §6.3](GUIDE.md#63-enter-the-settings)).
 
 ## Later updates: over the air
 
@@ -56,7 +56,7 @@ Once a pager runs firmware built with your OTA key (`make ota-keygen`, then `mak
 2. Run `make ota-publish`.
 3. On the pager: Settings → Update → hold KEY.
 
-See [GUIDE.md](GUIDE.md#8-firmware-updates).
+See [GUIDE.md](GUIDE.md#9-firmware-updates).
 
 ## Recovering a board that does not enumerate
 

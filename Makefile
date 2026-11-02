@@ -14,7 +14,7 @@ ID        ?= pager-1
 COMPOSE   := docker compose
 LOAD_ENV  := set -a && . ./$(ENV_FILE) && set +a
 
-.PHONY: help env install test run build up up-public logs-caddy down ingest-token audit rotate-secrets ota-keygen ota-publish restart logs ps health device rotate backup import-db \
+.PHONY: help env install test run build up up-public logs-caddy down ingest-token audit rotate-secrets ota-keygen ota-sign ota-install ota-publish restart logs ps health device rotate backup import-db \
         demo fw-build fw-test fw-sim fw-diag fw-flash fw-monitor clean
 
 help: ## Show this help
@@ -135,19 +135,25 @@ rotate-secrets: $(ENV_FILE) ## New admin + shared ingest tokens in .env (old .en
 ota-keygen: ## Create the OTA signing key (secrets/, never committed) and its firmware header
 	python3 tools/ota.py keygen
 
-ota-publish: ## Build, sign and publish the current firmware for OTA (server must be running)
+ota-sign: ## Build and sign the current firmware into build/ota/ (run where the signing key is)
 	cd firmware && $(PIO) run -e tdisplays3
 	rm -rf build/ota && python3 tools/ota.py sign firmware/.pio/build/tdisplays3/firmware.bin build/ota
-	@cid=$$($(COMPOSE) ps -q smartpager); \
+
+ota-install: ## Install signed files from build/ota/ (or DIR=…) into the running server
+	@d=$${DIR:-build/ota}; test -f "$$d/manifest.json" -a -f "$$d/firmware.bin" || \
+	  { echo "no signed release in $$d — run 'make ota-sign' (and copy build/ota/ to this machine)" >&2; exit 1; }; \
+	cid=$$($(COMPOSE) ps -q smartpager); \
 	if [ -n "$$cid" ]; then \
 	  $(COMPOSE) exec -T smartpager mkdir -p /data/firmware && \
-	  docker cp build/ota/firmware.bin "$$cid:/data/firmware/firmware.bin" && \
-	  docker cp build/ota/manifest.json "$$cid:/data/firmware/manifest.json" && \
-	  echo "published to the container; pagers offer it in Settings → Update"; \
+	  docker cp "$$d/firmware.bin" "$$cid:/data/firmware/firmware.bin" && \
+	  docker cp "$$d/manifest.json" "$$cid:/data/firmware/manifest.json" && \
+	  echo "installed $$(grep -o '"version": "[^"]*"' $$d/manifest.json); pagers offer it in Settings → Update"; \
 	else \
-	  $(LOAD_ENV) && d=$$(dirname "$${SMARTPAGER_DB:-./data/smartpager.db}")/firmware && mkdir -p "$$d" && \
-	  cp build/ota/firmware.bin build/ota/manifest.json "$$d/" && echo "published to $$d (native server)"; \
+	  $(LOAD_ENV) && f=$$(dirname "$${SMARTPAGER_DB:-./data/smartpager.db}")/firmware && mkdir -p "$$f" && \
+	  cp "$$d/firmware.bin" "$$d/manifest.json" "$$f/" && echo "installed to $$f (native server)"; \
 	fi
+
+ota-publish: ota-sign ota-install ## Sign and install in one step (server on this same machine)
 
 demo: $(ENV_FILE) ## Run the protocol demo (needs DEVICE_TOKEN in the environment)
 	@$(LOAD_ENV) && SMARTPAGER_URL=http://127.0.0.1:$${SMARTPAGER_PORT:-8080} scripts/demo.sh

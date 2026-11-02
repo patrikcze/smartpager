@@ -8,7 +8,7 @@ Everything below was gathered on 2026-11-02 with read-only tools. The board was 
 |---|---|---|
 | Host | `sw_vers`, `uname -m` | macOS 27.2, arm64 |
 | Serial port | `ls /dev/cu.*` | `/dev/cu.usbmodem1101` |
-| USB descriptor | `ioreg -p IOUSB -l` | Vendor "Espressif", product "USB JTAG_serial debug unit", VID `0x303A`, PID `0x1001`, serial `DC:DA:0C:59:00:18` |
+| USB descriptor | `ioreg -p IOUSB -l` | Vendor "Espressif", product "USB JTAG_serial debug unit", VID `0x303A`, PID `0x1001`, serial = the Wi-Fi MAC address (masked here: `DC:DA:0C:xx:xx:xx`) |
 | Chip | `esptool --port /dev/cu.usbmodem1101 flash-id` (esptool 5.6.0) | **ESP32-S3 (QFN56) rev v0.2**, Wi-Fi + BLE 5, dual core 240 MHz, **embedded PSRAM 8 MB (AP_3v3)**, 40 MHz crystal, USB mode USB-Serial/JTAG |
 | Flash | same | Manufacturer `0xEF` (Winbond), device `0x4018`, **16 MB**, quad mode, 3.3 V |
 | Running firmware | passive serial capture after reset (115200 baud) | ROM boot banner, then `T-Display S3 Clock` and `Connecting to WiFi....` |

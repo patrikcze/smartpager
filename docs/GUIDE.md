@@ -1,18 +1,21 @@
 # Secure setup guide
 
-This guide takes you from an empty machine to pagers that receive messages **encrypted over HTTPS** from anywhere. Follow it top to bottom the first time.
+From an empty server to pagers that receive messages **encrypted over HTTPS** from anywhere. The examples use `pager.example.com`; replace it with your own domain everywhere.
 
 - [1. How the pieces fit](#1-how-the-pieces-fit)
 - [2. What you need](#2-what-you-need)
-- [3. Prepare the server](#3-prepare-the-server)
-- [4. Start it with HTTPS](#4-start-it-with-https)
-- [5. Connect a pager](#5-connect-a-pager)
-- [6. Send messages securely](#6-send-messages-securely)
-- [7. Use the admin console safely](#7-use-the-admin-console-safely)
-- [8. Firmware updates](#8-firmware-updates)
-- [9. Day-to-day operations](#9-day-to-day-operations)
-- [10. Security checklist](#10-security-checklist)
-- [Appendix: testing on a home network without HTTPS](#appendix-testing-on-a-home-network-without-https)
+- [3. Prepare the server machine](#3-prepare-the-server-machine)
+- [4. Configure SmartPager](#4-configure-smartpager)
+- [5. Start it and obtain the certificate](#5-start-it-and-obtain-the-certificate)
+- [6. Connect a pager](#6-connect-a-pager)
+- [7. Send messages securely](#7-send-messages-securely)
+- [8. Use the admin console safely](#8-use-the-admin-console-safely)
+- [9. Firmware updates](#9-firmware-updates)
+- [10. Day-to-day operations](#10-day-to-day-operations)
+- [11. Security checklist](#11-security-checklist)
+- [Appendix A: ports 80/443 are already in use](#appendix-a-ports-80443-are-already-in-use)
+- [Appendix B: moving existing data to the new server](#appendix-b-moving-existing-data-to-the-new-server)
+- [Appendix C: testing on a home network without HTTPS](#appendix-c-testing-on-a-home-network-without-https)
 
 ---
 
@@ -21,110 +24,173 @@ This guide takes you from an empty machine to pagers that receive messages **enc
 ```
   pager(s) ─────────┐  HTTPS (TLS 1.2+, certificate verified on the pager)
   scripts, webhooks ┼──────────────▶  Caddy :443  ──▶  SmartPager server  ──▶  SQLite
-  e-mail connector ─┘  internet / LAN   Let's Encrypt     (Docker network,      (Docker volume)
-                                         auto-renewing     not reachable from
-                                                            outside)
-  you (admin) ──▶ http://127.0.0.1:8080/admin   (only on the server machine, or via SSH/VPN)
+  e-mail connector ─┘    internet       Let's Encrypt     (Docker network,      (Docker volume)
+                                        auto-renewing      not reachable from
+                                                           outside)
+  you (admin) ──▶ SSH tunnel ──▶ http://127.0.0.1:8080/admin   (never exposed publicly)
 ```
 
-| Credential | Who holds it | What it can do |
+| Credential | Lives | What it can do |
 |---|---|---|
-| **Device token** (`spd_…`) | one per pager | sync its own inbox, report read/ack, download signed firmware |
-| **Ingest token** (`spi_…`) | one per integration (script, Grafana, …) | create messages only |
-| **Admin token** | you, in `.env` | everything, but only on the local port |
-| **OTA signing key** | you, in `secrets/` | sign firmware updates. Never leaves your computer |
+| **Device token** (`spd_…`) | on each pager | sync its own inbox, report read/ack, download signed firmware |
+| **Ingest token** (`spi_…`) | in each script or service | create messages only |
+| **Admin token** | server's `.env` | everything, but only on the server's local port |
+| **OTA signing key** | your own computer (`secrets/`), **never on the server** | sign firmware updates |
 
-What is encrypted in this setup is summarised in [SECURITY.md](SECURITY.md#what-is-encrypted).
+What is and isn't encrypted is summarised in [SECURITY.md](SECURITY.md#what-is-encrypted).
 
 ## 2. What you need
 
-- A computer that stays on: a small Linux box, NAS or Mac, with Docker and this repository.
-- A **domain name** pointing to your public IP, e.g. `pager.example.com`. Dynamic DNS works.
-- Ports **80 and 443** forwarded from your router to that computer. Let's Encrypt uses port 80 to issue the certificate.
-- For flashing pagers: USB and [PlatformIO](https://platformio.org/install/cli).
+- **A Linux server with a public IP.** For example a small cloud VM (Oracle Cloud, Hetzner, …) or a home server with port forwarding. 1 CPU, 1 GB RAM and 5 GB disk are plenty. Both x86-64 and ARM (e.g. Oracle Ampere) work.
+- **A domain name** with a DNS record for the pager name pointing at that IP, as an `A` record or a `CNAME` to a name that has one.
+- **Your own computer** (macOS or Linux) with this repository, [PlatformIO](https://platformio.org/install/cli) and a USB cable, to flash pagers and sign firmware.
 
-## 3. Prepare the server
+Check DNS from your computer:
+
+```bash
+dig +short pager.example.com
+```
+
+It must print your server's public IP. If the name also has an `AAAA` (IPv6) record, the server must be reachable over IPv6 too, or remove that record: Let's Encrypt tries IPv6 first.
+
+## 3. Prepare the server machine
+
+Log in over SSH and install Docker (with the Compose plugin), `git`, `make` and Python 3.
+
+```bash
+# Ubuntu / Debian
+sudo apt update && sudo apt install -y git make python3 ca-certificates curl
+curl -fsSL https://get.docker.com | sudo sh      # Docker Engine + compose plugin (official script)
+sudo usermod -aG docker $USER                    # then log out and back in
+```
+
+On Oracle Linux, install Docker Engine following Docker's documentation for RHEL‑compatible systems, then `sudo dnf install -y git make python3`.
+
+**Open ports 80 and 443.** Let's Encrypt needs port 80 to verify the domain. Pagers and scripts use 443. Cloud providers usually block both **twice**, and both layers must allow them:
+
+1. **Cloud firewall.**
+   - Oracle Cloud: *Networking → Virtual cloud networks → your VCN → Security Lists* (or the instance's *Network Security Group*). Add ingress rules for TCP **80** and **443** from `0.0.0.0/0`.
+   - Other providers: the equivalent "security group" / firewall rules.
+2. **Firewall on the VM itself:**
+   ```bash
+   # Ubuntu with ufw
+   sudo ufw allow 80/tcp && sudo ufw allow 443/tcp
+   ```
+   ```bash
+   # Oracle Linux / RHEL (firewalld)
+   sudo firewall-cmd --permanent --add-service=http --add-service=https && sudo firewall-cmd --reload
+   ```
+   Oracle's Ubuntu images ship their own `iptables` rules that reject everything except SSH. If HTTPS doesn't connect later, insert accept rules before the final REJECT, and persist them:
+   ```bash
+   sudo iptables -I INPUT 5 -p tcp --dport 80 -j ACCEPT && sudo iptables -I INPUT 5 -p tcp --dport 443 -j ACCEPT && sudo netfilter-persistent save
+   ```
+
+**Check that nothing else uses ports 80/443.** If your domain already serves a website from this machine:
+
+```bash
+sudo ss -ltnp '( sport = :80 or sport = :443 )'
+```
+
+If this shows nginx, Apache or another Caddy, follow [Appendix A](#appendix-a-ports-80443-are-already-in-use) instead of §5.
+
+**Get the code onto the server:**
+
+```bash
+git clone https://github.com/<you>/<repo>.git smartpager && cd smartpager
+```
+
+## 4. Configure SmartPager
+
+On the **server**:
 
 ```bash
 make env
 ```
 
-This creates `.env` with random tokens. The file is readable only by you and is never committed. Edit it:
+This creates `.env` with random admin and ingest tokens. It's readable only by you and never committed. Edit three lines in it:
 
 ```bash
 SMARTPAGER_DOMAIN=pager.example.com
-ACME_EMAIL=you@example.com
-SMARTPAGER_BIND=127.0.0.1        # keep the unencrypted port on this machine only
+ACME_EMAIL=you@example.com          # Let's Encrypt expiry notices
+SMARTPAGER_BIND=127.0.0.1           # plain-HTTP port stays local; everything public goes through HTTPS
 ```
 
-Then create your firmware-signing key once and **back it up** (password manager or an encrypted drive):
+On **your own computer**, once, create the firmware-signing key and back it up (password manager or encrypted drive). It never goes to the server:
 
 ```bash
 make ota-keygen
 ```
 
-## 4. Start it with HTTPS
+## 5. Start it and obtain the certificate
+
+On the server:
 
 ```bash
 make up-public
 ```
 
+This builds the server image, starts it, then starts **Caddy**. Caddy requests a Let's Encrypt certificate for `SMARTPAGER_DOMAIN` automatically: no certbot, no manual steps, and Caddy renews it automatically well before it expires. Watch it:
+
 ```bash
 make logs-caddy
 ```
 
-Wait for `certificate obtained successfully`, then check from outside your network, e.g. on a phone using mobile data:
+Look for `certificate obtained successfully`. If you see `timeout during connect` or `connection refused`, port 80 isn't reachable from the internet: recheck both firewall layers (§3) and DNS (§2). Caddy keeps retrying, and switches to Let's Encrypt's staging service while failing, so you won't hit rate limits.
+
+Verify from **another network**, e.g. your laptop or a phone on mobile data:
 
 ```bash
 curl https://pager.example.com/health
 ```
 
-It should return `{"status":"ok",…}`. These requests should return `Not Found` from the internet:
+It should return `{"status":"ok",…}`.
 
-- `https://pager.example.com/admin`
-- `https://pager.example.com/docs`
-- `https://pager.example.com/api/v1/messages`
+These must return `Not Found`:
 
-The server comes back by itself after a reboot as long as Docker starts at login (Docker Desktop → Settings → General → *Start Docker Desktop when you sign in*).
+```bash
+curl https://pager.example.com/admin
+```
 
-> **Pagers at home use the public name too.** If your router can't route your own public IP back inside (no "NAT loopback"), add a local DNS entry for `pager.example.com` pointing to the server's LAN address. The certificate stays valid either way.
+```bash
+curl https://pager.example.com/api/v1/messages
+```
 
-## 5. Connect a pager
+The containers restart automatically after a reboot (`restart: unless-stopped`; Docker Engine starts at boot on Linux).
 
-### 5.1 Register it on the server
+## 6. Connect a pager
+
+### 6.1 Register it on the server
 
 ```bash
 make device ID=pager-1
 ```
 
-This prints `token: spd_…` **once**. Only a hash is stored, so copy it now. If you lose it, run `make rotate ID=pager-1` to get a new one.
+This prints `token: spd_…` **once**; only a hash is stored. If the device already exists, e.g. after importing data (Appendix B), issue a fresh token with `make rotate ID=pager-1`.
 
-### 5.2 Flash the firmware (first time only, over USB)
+### 6.2 Flash it (first time only, from your computer over USB)
 
 ```bash
 make fw-flash
 ```
 
-The firmware includes the Let's Encrypt root certificates and your OTA public key, so later updates come over Wi-Fi ([§8](#8-firmware-updates)). Board-specific notes are in [FLASHING.md](FLASHING.md).
+The firmware contains the Let's Encrypt root certificates and your OTA public key. Nothing has to be pasted for HTTPS. See [FLASHING.md](FLASHING.md) for board details.
 
-### 5.3 Enter the settings
+### 6.3 Enter the settings
 
-A pager without settings starts **setup mode**. Its screen shows a Wi-Fi network `SmartPager-XXXX`, a one-time password, and `http://192.168.4.1`. To re-enter setup mode later: *Settings → Setup mode* (hold KEY), or hold **KEY** while pressing **RST**.
+A pager without settings starts **setup mode**. Its screen shows a Wi-Fi name `SmartPager-XXXX`, a one-time password, and `http://192.168.4.1`.
 
-**Option A: phone or laptop (no tools needed)**
+**Option A: phone or laptop**
 
-1. Join `SmartPager-XXXX` with the password shown on the pager.
+1. Join `SmartPager-XXXX` with the password from the pager screen.
 2. Open `http://192.168.4.1` and fill in:
-   - **Wi-Fi network and password**
-   - **Server URL:** `https://pager.example.com`. It must start with `https://`.
+   - **Wi-Fi network and password**: the network the pager will use day to day
+   - **Server URL:** `https://pager.example.com`, with no port and no trailing slash
    - **Device ID:** `pager-1`
    - **Device token:** the `spd_…` value
-   - leave *Custom root CA* empty: Let's Encrypt is built in
+   - leave *Custom root CA* **empty**: Let's Encrypt is built in
 3. Tap **Save and restart**.
 
-**Option B: from the computer over USB (no typing of long tokens)**
-
-While the setup screen is shown:
+**Option B: from your computer over USB.** No typing of long tokens; run it while the setup screen is shown:
 
 ```bash
 SMARTPAGER_DEVICE_TOKEN=spd_… WIFI_PASSWORD='…' \
@@ -132,23 +198,37 @@ SMARTPAGER_DEVICE_TOKEN=spd_… WIFI_PASSWORD='…' \
   --url https://pager.example.com --device pager-1 --ssid "MyWiFi" --restart
 ```
 
-Secrets are passed as environment variables, so they don't end up in your shell history. `pio device list` shows the port name.
+The secrets come from environment variables, so they stay out of your shell history. Find the port with `pio device list`. Without `uv`, use `pip install pyserial` and run `python3 tools/provision.py …`.
 
-### 5.4 Check the connection
+### 6.4 Switching a pager that already uses another server
 
-Within a few seconds the pager footer reads *Synced just now*, and in the console (§7) the device shows *seen just now* with firmware `0.2.1`. Send a test message (§6). It should appear on the pager in about 1–2 s.
+For example a pager that was tested against a home server over `http://`:
 
-**More pagers:** repeat §5 with `ID=pager-2` and so on. All pagers share one inbox: reading or acknowledging on one marks it on all.
+1. **On the new server:**
+   - New device: run §6.1.
+   - Existing device: `make rotate ID=pager-1`. The old token, which travelled unencrypted, stops working immediately.
+2. **On the pager:** *Settings* (short-press BOOT on the home screen) → *Setup mode* → hold **KEY**. The pager restarts into setup mode.
+3. **Enter** the new `https://` URL and token with Option A or B of §6.3. Your Wi-Fi settings are kept: leave the Wi-Fi password field empty in the portal, or omit `--ssid` with USB.
 
-## 6. Send messages securely
+When the server URL or device ID changes, the pager deletes its old cached inbox and downloads the new server's inbox. It never mixes the two.
 
-Give **each** script or service its own ingest token:
+### 6.5 Check the connection
+
+- The pager footer shows *Synced just now*.
+- On the server, `docker compose exec smartpager smartpager-admin devices` shows `last_seen_at` updating and `"firmware": "0.2.1"`.
+- Send a test message (§7). It appears on the pager within about 1–2 s.
+
+**More pagers:** repeat §6 with `ID=pager-2` and so on. All pagers share one inbox: reading or acknowledging on one marks it on all.
+
+## 7. Send messages securely
+
+Create a separate ingest token for **each** script or service. On the server:
 
 ```bash
 make ingest-token NAME=backup-script
 ```
 
-Then send over HTTPS:
+Then send from anywhere over HTTPS:
 
 ```bash
 curl -X POST https://pager.example.com/api/v1/messages \
@@ -156,69 +236,119 @@ curl -X POST https://pager.example.com/api/v1/messages \
   -d '{"source":"system","sender":"NAS","subject":"Backup completed","priority":"normal","external_id":"backup-2026-11-02"}'
 ```
 
-- Use a unique `external_id` per event, so a retried request never pages you twice.
-- Services that can't set headers can use `https://pager.example.com/api/v1/webhooks/generic?token=spi_…`. Only ingest tokens work in URLs.
-- If a token leaks, revoke just that one: in the console, or with `docker compose exec smartpager smartpager-admin ingest-revoke backup-script`.
-- Request formats, Alertmanager and e-mail are covered in [API.md](API.md) and [INTEGRATIONS.md](INTEGRATIONS.md).
+- **Retries:** give each event a unique `external_id`, so a retried request never pages you twice.
+- **No custom headers:** services that can't set headers can post to `https://pager.example.com/api/v1/webhooks/generic?token=spi_…`. Only ingest tokens work in URLs.
+- **Leaked token:** revoke just that one, in the console (§8) or with `docker compose exec smartpager smartpager-admin ingest-revoke backup-script`.
+- **More formats:** see [API.md](API.md) and [INTEGRATIONS.md](INTEGRATIONS.md) (Alertmanager, e-mail).
 
-## 7. Use the admin console safely
+## 8. Use the admin console safely
 
-The console and every admin API are **only** on the local port. They return 404 through the public address, by design.
-
-- **On the server:** <http://127.0.0.1:8080/admin>. Paste the admin token (`grep ADMIN .env`). It's kept only in that browser tab; *Lock* forgets it.
-- **From elsewhere:** open an SSH tunnel, then use the same local URL:
-
-  ```bash
-  ssh -L 8080:127.0.0.1:8080 you@server
-  ```
-
-  A VPN such as Tailscale also works. Never set `SMARTPAGER_BIND=0.0.0.0` on an internet-facing machine.
-
-## 8. Firmware updates
-
-Releases are signed with your key. The pager verifies the signature, refuses older versions, and checks the image hash before installing. It installs only when you ask it to.
+The console and the admin API exist **only** on the server's local port; through the public address they return 404, by design. Reach them with an SSH tunnel from your computer:
 
 ```bash
-# 1. bump SMARTPAGER_VERSION in firmware/src/app_state.h (e.g. 0.2.1 → 0.2.2)
-make ota-publish
+ssh -L 8080:127.0.0.1:8080 you@your-server
 ```
 
-On the pager: *Settings → Update* shows `0.2.2 ready` (it checks every 6 h and after boot). Hold **KEY** to install. It restarts and keeps its inbox.
+Then open <http://127.0.0.1:8080/admin> locally. Paste the admin token, which you can print on the server with `grep ADMIN .env`. It's kept only in that browser tab; *Lock* forgets it. The tunnel encrypts the connection.
 
-There is no automatic rollback. If a release doesn't boot, reflash it with `make fw-flash`.
+## 9. Firmware updates
 
-## 9. Day-to-day operations
+Updates are signed on **your computer** (where the key is) and installed on the server. The server can't create or alter firmware; it only hosts it.
+
+```bash
+# on your computer: bump SMARTPAGER_VERSION in firmware/src/app_state.h (e.g. 0.2.1 → 0.2.2), then
+make ota-sign
+scp -r build/ota you@your-server:smartpager/build/
+```
+
+```bash
+# on the server
+make ota-install
+```
+
+On the pager: *Settings → Update* shows `0.2.2 ready`. The pager checks every 6 h and after boot. Hold **KEY** to install; it restarts with its inbox intact.
+
+There is no automatic rollback: if a release doesn't boot, reflash over USB with `make fw-flash`. When the server runs on the same machine you sign on, `make ota-publish` does both steps.
+
+## 10. Day-to-day operations
+
+Run these on the server:
 
 | Task | Command |
 |---|---|
-| Health / status | `make health`, `make ps`, `make logs` |
-| Backup the database (keep copies off the machine) | `make backup` → `backups/` |
-| Who did what | `make audit`, or *Audit log* in the console |
-| New admin token (e.g. after sharing a screen) | `make rotate-secrets` |
-| Lost or stolen pager | `make rotate ID=pager-1` immediately (old token stops at once) |
+| Status | `make health`, `make ps`, `make logs`, `make logs-caddy` |
+| Backup the database (copy it off the server) | `make backup`, then `scp you@your-server:smartpager/backups/*.db .` |
+| Who did what | `make audit` |
+| New admin token | `make rotate-secrets` |
+| Lost or stolen pager | `make rotate ID=pager-1`, immediately |
 | Remove a pager | `docker compose exec smartpager smartpager-admin device-delete pager-1` |
-| Stop everything | `make down` (data is kept) |
+| Update the server software | `git pull && make up-public` |
+| Stop everything | `make down` (data and certificates are kept in Docker volumes) |
 
-## 10. Security checklist
+## 11. Security checklist
 
-- [ ] Pagers and integrations use `https://pager.example.com`, never `http://`.
-- [ ] `SMARTPAGER_BIND=127.0.0.1` in `.env`, so the unencrypted port isn't reachable from the network.
-- [ ] One ingest token per integration. The shared `SMARTPAGER_INGEST_TOKEN` in `.env` is empty once nothing uses it.
-- [ ] Every token that ever travelled over plain HTTP has been rotated (`make rotate-secrets`, `make rotate ID=…`).
-- [ ] `.env`, `secrets/ota_signing_key.pem` and `backups/` are backed up somewhere safe and never shared or committed.
-- [ ] Docker starts at login, and `make health` works after a reboot.
-- [ ] You know what isn't protected: messages are readable on the server and on the pager's flash ([SECURITY.md](SECURITY.md#what-is-encrypted)).
+- [ ] `curl https://pager.example.com/health` works from outside, and `/admin` returns `Not Found`.
+- [ ] `SMARTPAGER_BIND=127.0.0.1` on the server. Docker-published ports **bypass `ufw`**, so this setting, not the VM firewall, is what keeps port 8080 private. Check from outside: `curl -m 5 http://pager.example.com:8080/health` must fail.
+- [ ] Pagers and integrations use `https://`, never `http://`.
+- [ ] One ingest token per integration. Once nothing uses the shared `SMARTPAGER_INGEST_TOKEN`, empty it in `.env` and run `make up-public`.
+- [ ] Tokens that ever travelled over plain HTTP are rotated (`make rotate-secrets`, `make rotate ID=…`).
+- [ ] The OTA signing key is backed up and exists **only** on your computer.
+- [ ] The server's `.env` and the backups are protected, and never shared or committed.
+- [ ] SSH on the server uses keys (password login disabled), and the OS gets security updates (`unattended-upgrades` on Ubuntu).
+- [ ] You know what isn't protected: messages are readable on the server and on the pager ([SECURITY.md](SECURITY.md#what-is-encrypted)).
 
 ---
 
-## Appendix: testing on a home network without HTTPS
+## Appendix A: ports 80/443 are already in use
 
-For a quick first test you can skip the domain and run plain HTTP on your LAN:
+If an existing web server (e.g. nginx for your main website) already listens on 80/443, Caddy can't start. Let that web server handle HTTPS for the pager subdomain instead:
+
+1. In the server's `.env`, add:
+
+   ```bash
+   SMARTPAGER_TRUSTED_PROXY=172.30.0.1
+   ```
+
+   This tells SmartPager to trust the client address forwarded by a proxy on the host. Keep `SMARTPAGER_BIND=127.0.0.1`.
+2. Start SmartPager **without** Caddy:
+
+   ```bash
+   make up
+   ```
+
+3. Configure nginx using [`deploy/nginx-smartpager.conf`](../deploy/nginx-smartpager.conf). It has the same path allow-list as the bundled Caddy, and its comments explain the include file and the certificate.
+4. Get the certificate with certbot:
+
+   ```bash
+   sudo certbot --nginx -d pager.example.com
+   ```
+
+   Then reload nginx (`sudo nginx -t && sudo systemctl reload nginx`).
+5. Verify as in §5.
+
+For another proxy, copy the allow-list from [`deploy/Caddyfile`](../deploy/Caddyfile). Set `X-Forwarded-For` to the client address, replacing any client-supplied value rather than appending, and allow at least 60 s for responses (long polls).
+
+## Appendix B: moving existing data to the new server
+
+To keep messages and devices from an earlier server:
+
+```bash
+make backup      # on the old machine: backups/smartpager-….db
+```
+
+```bash
+scp backups/smartpager-*.db you@your-server:smartpager/
+```
+
+```bash
+make import-db DB=smartpager-….db    # on the new server
+```
+
+Then rotate every device token (`make rotate ID=…`) and re-provision the pagers (§6.4). The tokens in that database may have travelled over plain HTTP.
+
+## Appendix C: testing on a home network without HTTPS
 
 1. Set `SMARTPAGER_BIND=0.0.0.0` in `.env` and run `make up`.
 2. Use `http://<server-LAN-IP>:8080` as the pager's server URL.
 
-**This is not encrypted.** Anyone on that network who can capture traffic can read messages and the device token. Use it only on a network you trust, and only for testing. When you switch to §4:
-- set `SMARTPAGER_BIND=127.0.0.1` again,
-- rotate the tokens, and
-- point the pagers at the `https://` URL.
+**This is not encrypted:** anyone who can capture traffic on that network can read messages and the device token. Use it on a trusted network, for testing only. Never do this on an internet-facing server.

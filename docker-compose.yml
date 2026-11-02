@@ -6,9 +6,9 @@ services:
     env_file: .env
     environment:
       SMARTPAGER_DB: /data/smartpager.db  # overrides the native path from .env
-      # Trust X-Forwarded-For only from the Caddy container (static address below), so
-      # rate limiting and the audit log see real client addresses behind the proxy.
-      FORWARDED_ALLOW_IPS: 172.30.0.2
+      # Trust X-Forwarded-For only from the reverse proxy: the Caddy container (static address
+      # below) by default; 172.30.0.1 (the network gateway) when a proxy on the host is used.
+      FORWARDED_ALLOW_IPS: ${SMARTPAGER_TRUSTED_PROXY:-172.30.0.2}
     volumes:
       - smartpager-data:/data
     networks:
