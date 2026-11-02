@@ -1,0 +1,22 @@
+# secrets and local data
+.env
+*.db
+*.db-wal
+*.db-shm
+server/data/
+data/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+build/
+
+# platformio
+firmware/.pio/
+firmware/.vscode/
+
+# os
+.DS_Store
