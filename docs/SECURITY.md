@@ -1,5 +1,35 @@
 # Security
 
+## What is encrypted
+
+| Path | Recommended setup ([GUIDE.md](GUIDE.md)) | Home-LAN test mode (`http://`) |
+|---|---|---|
+| Pager ⇄ server (messages, device token, read/ack) | **Encrypted:** HTTPS via Caddy + Let's Encrypt. The pager verifies the certificate chain and hostname | **Not encrypted.** Readable by anyone who can capture traffic on that network |
+| Scripts / webhooks / e-mail connector → server | **Encrypted** (HTTPS) | Not encrypted |
+| Caddy → SmartPager server | Plain HTTP inside the Docker network on the same machine, never on the wire | n/a |
+| Admin console | Only on `127.0.0.1` (same machine) or through your SSH tunnel / VPN, which encrypts it | Same, unless you bound it to the LAN |
+| Setup portal (phone → pager) | Plain HTTP on the pager's own WPA2 network, with a random one-time password shown only on the pager screen | Same |
+| Firmware updates | Delivered over HTTPS, and **signed**: authenticity doesn't depend on the transport | Signed, but not encrypted in transit |
+| Messages stored on the server (SQLite) | **Not encrypted at rest.** Protected by the machine's own disk encryption (e.g. FileVault) and file permissions | Same |
+| Messages cached on the pager (last 40) | **Not encrypted at rest** (see below) | Same |
+
+In short:
+- With HTTPS, nobody between your pager or script and your server can read or change messages.
+- The server and the pager themselves hold messages in readable form, so this is **not end-to-end encryption**.
+- Anyone with access to the server machine, its backups, or the physical pager can read stored messages.
+- Keep sensitive content short, and use retention (`SMARTPAGER_RETENTION_DAYS`) to limit how much is kept.
+
+## What is reachable from the internet
+
+With `make up-public`, Caddy forwards only:
+- the pager endpoints (`/api/v1/devices/{id}/sync`, `…/events`, `…/firmware`, `…/firmware/image`)
+- message creation (`POST /api/v1/messages`) and `POST /api/v1/webhooks/*`
+- `GET /health`
+
+Everything else, including `/admin`, `/docs` and the whole admin API, gets a 404 at the proxy. The app independently refuses admin requests that arrive through the proxy.
+
+**Why there's no IP allow-list for the admin.** Docker Desktop on macOS presents every incoming connection, including internet traffic, as `192.168.65.1`, a private address. An allow-list based on IP ranges would silently admit everyone. Keeping the admin off the public site works the same on every platform.
+
 ## Credentials
 
 | Secret | Stored | Notes |
@@ -10,14 +40,14 @@
 | Wi-Fi password, device token, CA | device NVS (`smartpager` namespace) | see below |
 
 - The server refuses to start without an admin token of at least 24 characters. The optional shared ingest token must also be at least 24 characters and differ from it.
-- **The admin is local-only.** Requests that arrive through the public proxy (they carry `X-Forwarded-For`) are refused on every admin endpoint, `/admin`, `/docs` and `/openapi.json`, and the admin token can't create messages that way. Caddy additionally routes only device, ingest and webhook paths ([DEPLOY_PUBLIC.md](DEPLOY_PUBLIC.md)).
+- **The admin is local-only.** Requests that arrive through the public proxy (they carry `X-Forwarded-For`) are refused on every admin endpoint, `/admin`, `/docs` and `/openapi.json`, and the admin token can't create messages that way. Caddy additionally routes only device, ingest and webhook paths ([GUIDE.md](GUIDE.md)).
 - **Audit log.** Admin and CLI actions (device and token creation/rotation/revocation, read/ack/delete, firmware downloads) are recorded with actor and client IP, never message contents. Retained for max(retention, 90) days. View it with `make audit` or in the console.
 - No credentials have defaults, in the server or the firmware. The setup access point gets a new random 10-character WPA2 password every time setup mode starts, and it is shown only on the device screen.
 - Token comparisons are constant-time. Failed authentications are rate-limited per client IP. Normal traffic is rate-limited per credential (`SMARTPAGER_RATE_LIMIT_PER_MIN`).
 
 ## Transport
 
-- **Server binding.** The server binds to `127.0.0.1` by default, including the published port in Docker Compose. Exposing it on the LAN is an explicit choice ([SETUP.md](SETUP.md#2-make-the-server-reachable-from-the-pager)).
+- **Server binding.** The server binds to `127.0.0.1` by default, including the published port in Docker Compose. Exposing it on the LAN is an explicit choice ([GUIDE.md](GUIDE.md), [SETUP.md](SETUP.md#testing-with-a-pager-on-the-home-network-plain-http)).
 - **Plain HTTP** is meant for isolated, trusted development networks only. The device token and message contents travel unencrypted.
 - **HTTPS.** The firmware always verifies the server certificate chain and hostname (mbedTLS). It trusts the built-in Let's Encrypt roots (ISRG Root X1, X2 and the Generation Y roots YE and YR), or a custom root CA provisioned in setup instead. There is no "insecure" mode.
 - **Public deployment.** Caddy terminates TLS with Let's Encrypt, sets HSTS, caps bodies at 64 KB, and passes the real client IP only to the app (uvicorn trusts `X-Forwarded-For` solely from the Caddy container's fixed address).

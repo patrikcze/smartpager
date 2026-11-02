@@ -139,15 +139,18 @@ def _csv(name: str) -> list[str]:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = {
-        "host": os.environ["IMAP_HOST"], "port": int(os.environ.get("IMAP_PORT", "993")),
-        "user": os.environ["IMAP_USER"], "password": os.environ["IMAP_PASSWORD"],
+        "host": os.environ.get("IMAP_HOST", ""), "port": int(os.environ.get("IMAP_PORT") or "993"),
+        "user": os.environ.get("IMAP_USER", ""), "password": os.environ.get("IMAP_PASSWORD", ""),
         "folder": os.environ.get("IMAP_FOLDER", "INBOX"),
         "lookback_days": int(os.environ.get("IMAP_LOOKBACK_DAYS", "2")),
         "max_per_poll": int(os.environ.get("IMAP_MAX_PER_POLL", "25")),
         "allow": _csv("IMAP_ALLOW_SENDERS"), "deny": _csv("IMAP_DENY_SENDERS"),
         "url": os.environ.get("SMARTPAGER_URL", "http://127.0.0.1:8080"),
-        "token": os.environ["SMARTPAGER_INGEST_TOKEN"],
+        "token": os.environ.get("SMARTPAGER_INGEST_TOKEN", ""),
     }
+    if not cfg["token"] or not cfg["host"] or not cfg["user"]:
+        raise SystemExit("IMAP connector: set IMAP_HOST, IMAP_USER, IMAP_PASSWORD and an ingest token "
+                         "(IMAP_INGEST_TOKEN in .env; create it with: make ingest-token NAME=imap)")
     interval = int(os.environ.get("IMAP_POLL_SECONDS", "60"))
     stop = False
 

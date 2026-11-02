@@ -1,11 +1,17 @@
 # Integrations
 
-Integrations are optional and separate from the core. All of them inject messages through the same `POST /api/v1/messages` (or `/webhooks/*`) path using the **ingest** token.
+Integrations are optional and separate from the core. All of them inject messages through the same `POST /api/v1/messages` (or `/webhooks/*`) path, over HTTPS, each with **its own ingest token**:
+
+```bash
+make ingest-token NAME=alertmanager
+```
+
+This prints `spi_…` once. Revoke it later without affecting other integrations.
 
 ## Webhooks (implemented, tested)
 
 ```bash
-curl -X POST http://127.0.0.1:8080/api/v1/webhooks/generic -H "Authorization: Bearer $SMARTPAGER_INGEST_TOKEN" \
+curl -X POST https://pager.example.com/api/v1/webhooks/generic -H "Authorization: Bearer spi_…" \
   -H 'Content-Type: application/json' -d '{"title":"Deploy done","message":"v1.2.3 live","sender":"CI","id":"deploy-123"}'
 ```
 
@@ -15,16 +21,21 @@ Prometheus Alertmanager receiver:
 receivers:
   - name: pager
     webhook_configs:
-      - url: http://smartpager:8080/api/v1/webhooks/alertmanager
+      - url: https://pager.example.com/api/v1/webhooks/alertmanager
         http_config:
           authorization: {type: Bearer, credentials_file: /etc/alertmanager/smartpager-ingest-token}
 ```
 
-Most tools (Home Assistant `rest_command`, Grafana contact points, GitHub Actions, cron jobs) can call the generic webhook or the plain messages endpoint directly.
+Most tools (Home Assistant `rest_command`, Grafana contact points, GitHub Actions, cron jobs) can call the generic webhook or the messages endpoint directly. Tools that can't set an `Authorization` header can use `…/webhooks/generic?token=spi_…`.
 
 ## E-mail via IMAP (implemented, tested offline)
 
-`server/app/integrations/imap_connector.py` runs as its own process. With Docker: `docker compose --profile email up -d`. Configure it with the `IMAP_*` variables in `.env.example`.
+`server/app/integrations/imap_connector.py` runs as its own process. With Docker:
+1. Run `make ingest-token NAME=imap` and put the printed token into `.env` as `IMAP_INGEST_TOKEN`.
+2. Set the other `IMAP_*` variables from `.env.example`.
+3. Run `docker compose --profile email up -d`.
+
+The connector container receives only those variables, never the admin token, and talks to the server over the internal network. For a native run, set `SMARTPAGER_URL` to your `https://` address and `SMARTPAGER_INGEST_TOKEN` to a dedicated `spi_…` token.
 
 - It opens the mailbox **read-only** (`EXAMINE`) and fetches with `BODY.PEEK`, so your e-mail is never marked as read or changed.
 - It forwards sender, subject, received time, a 400-character plain-text preview, and priority from `X-Priority`.

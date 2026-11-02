@@ -60,9 +60,18 @@ services:
     build: ./server
     image: smartpager-server:0.1.0
     restart: unless-stopped
-    env_file: .env
+    # Least privilege: only the IMAP settings and a dedicated ingest token, never the admin token.
     environment:
       SMARTPAGER_URL: http://smartpager:8080
+      SMARTPAGER_INGEST_TOKEN: ${IMAP_INGEST_TOKEN:-}  # make ingest-token NAME=imap
+      IMAP_HOST: ${IMAP_HOST:-}
+      IMAP_PORT: ${IMAP_PORT:-993}
+      IMAP_USER: ${IMAP_USER:-}
+      IMAP_PASSWORD: ${IMAP_PASSWORD:-}
+      IMAP_FOLDER: ${IMAP_FOLDER:-INBOX}
+      IMAP_POLL_SECONDS: ${IMAP_POLL_SECONDS:-60}
+      IMAP_ALLOW_SENDERS: ${IMAP_ALLOW_SENDERS:-}
+      IMAP_DENY_SENDERS: ${IMAP_DENY_SENDERS:-}
     command: ["python", "-m", "app.integrations.imap_connector"]
     depends_on: [smartpager]
     networks: [smartpager]

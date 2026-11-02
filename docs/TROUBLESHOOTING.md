@@ -2,14 +2,14 @@
 
 | Symptom | Cause / fix |
 |---|---|
-| Server exits with `SMARTPAGER_ADMIN_TOKEN must be set…` | Put two different random values (≥ 24 chars) into `.env` and load it (`set -a; source .env; set +a`). |
-| `401 invalid credentials` | Check the token type: the ingest token can't list messages, the admin token can't sync as a device. Device tokens only work for their own `{device_id}`. |
+| Server exits with `SMARTPAGER_ADMIN_TOKEN must be set…` | Run `make env` (creates `.env` with random tokens). For native runs, `make run` loads it for you. |
+| `401 invalid credentials` | Check the token type: ingest tokens (`spi_…`) can only create messages, device tokens (`spd_…`) only work for their own `{device_id}`, and the admin token works only on the local port. A revoked or rotated token stops working immediately. |
 | `429 rate limit exceeded` | Too many failed logins from that IP, or a script hammering the API. Wait for `Retry-After` or raise `SMARTPAGER_RATE_LIMIT_PER_MIN`. |
-| Pager footer shows *Server offline · retrying* | The pager can't reach the URL. The server must be bound to the LAN, not `127.0.0.1`. Check the firewall. From another LAN device run `curl http://<ip>:8080/health`. Retries back off up to 30 s; *Settings → Sync now* retries immediately. |
+| Pager footer shows *Server offline · retrying* | The pager can't reach the URL. For HTTPS: from a phone on the same Wi-Fi, run `curl https://pager.example.com/health`; if it fails only at home, your router lacks NAT loopback (add a local DNS entry, see [GUIDE.md §4](GUIDE.md#4-start-it-with-https)). For the plain-HTTP test mode, the server must be bound to the LAN. Retries back off up to 30 s; *Settings → Sync now* retries immediately. |
 | *Server rejected token* | Wrong device ID or token in setup, or the token was rotated. Re-enter it in setup mode. The pager waits 5 min between attempts. |
 | Settings → Last sync shows *network error* with an https URL | The certificate didn't verify. Let's Encrypt works out of the box. For another CA, paste its **root** in setup mode, and remove a stale custom CA if you moved to Let's Encrypt. Check that the URL host matches the certificate, and that NTP is reachable for date checks. |
 | `make up-public`: no certificate | Ports 80/443 must reach this machine from the internet and DNS must point at it. See `make logs-caddy`. |
-| Admin console 404 at `https://…/admin` | By design: the admin is only on the local port. Use `http://127.0.0.1:8080/admin` on the server, or an SSH tunnel / VPN ([DEPLOY_PUBLIC.md](DEPLOY_PUBLIC.md#6-reaching-the-admin-console-remotely)). |
+| Admin console 404 at `https://…/admin` | By design: the admin is only on the local port. Use `http://127.0.0.1:8080/admin` on the server, or an SSH tunnel / VPN ([GUIDE.md](GUIDE.md#7-use-the-admin-console-safely)). |
 | Settings → Update shows *Bad signature* | The published manifest wasn't signed with the key this pager was built with. Publish with `make ota-publish` from the machine that holds `secrets/ota_signing_key.pem`. |
 | Settings → Update shows *Not configured* | The firmware was built without `firmware/include/ota_pubkey.h`. Run `make ota-keygen`, then `make fw-flash` once over USB. |
 | Clock shows `--:--` | No NTP and no successful sync yet. It fills in after the first sync, because server time is used as a fallback. |

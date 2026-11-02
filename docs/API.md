@@ -1,6 +1,6 @@
 # REST API (v1)
 
-Base URL: `http://127.0.0.1:8080` for local development. Every `/api/v1` request needs `Authorization: Bearer <token>`. Interactive OpenAPI docs are at `/docs`.
+Base URL: `https://pager.example.com` through the HTTPS front end (pager, ingest and webhook endpoints only), or `http://127.0.0.1:8080` on the server machine (everything, including admin). Every `/api/v1` request needs `Authorization: Bearer <token>`. Interactive OpenAPI docs are at `/docs`.
 
 | Credential | Where it comes from | Can do |
 |---|---|---|
@@ -8,7 +8,7 @@ Base URL: `http://127.0.0.1:8080` for local development. Every `/api/v1` request
 | **Admin token** | `SMARTPAGER_ADMIN_TOKEN` | everything except the device endpoints |
 | **Device token** | issued per device (`smartpager-admin device-create`). Only its SHA-256 is stored | `GET /devices/{own id}/sync`, `POST /devices/{own id}/events` |
 
-Admin endpoints, `/admin`, `/docs` and `/openapi.json` answer **404** to requests that came through the public proxy (see [DEPLOY_PUBLIC.md](DEPLOY_PUBLIC.md)).
+Admin endpoints, `/admin`, `/docs` and `/openapi.json` answer **404** to requests that came through the public proxy (see [GUIDE.md](GUIDE.md)).
 
 Errors use FastAPI's shape: `{"detail": ...}`. The status codes are 401 (missing or bad token), 404, 409 (device exists), 413 (body > 64 KiB), 422 (validation), 429 (rate limited, with `Retry-After`) and 500 (no internal details are returned).
 
@@ -129,7 +129,7 @@ A reset response, and any sync from cursor 0, contains only live messages and no
     {"id": "9f2c41aa0b7d13e4", "type": "read", "message_id": 1, "at": 1793628800},
     {"id": "41aa0b7d13e49f2c", "type": "ack",  "message_id": 1}
   ],
-  "status": {"fw": "0.1.0", "rssi": -58, "heap": 182000, "uptime": 3600}
+  "status": {"fw": "0.2.1", "rssi": -58, "heap": 182000, "uptime": 3600}
 }
 ```
 
@@ -142,5 +142,5 @@ A reset response, and any sync from cursor 0, contains only live messages and no
 
 ## Other
 
-- `GET /health` (no auth) → `{"status": "ok", "version": "0.1.0", "seq": 42}`
+- `GET /health` (no auth) → `{"status": "ok", "version": "0.1.0", "seq": 42}` (the server version, independent of the firmware version)
 - `GET /admin`: browser console (it asks for the admin token, which is kept in `sessionStorage` only)

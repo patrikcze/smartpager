@@ -1,5 +1,7 @@
 # Architecture
 
+All external traffic enters through **Caddy** (HTTPS, Let's Encrypt, path allow-list; `deploy/Caddyfile`), which forwards to the server on the internal Docker network. The admin console is reached only on the server's local port. The diagram shows the logical flows behind Caddy.
+
 ```
  ┌───────────────┐  POST /messages        ┌──────────────────────────────┐   GET  /devices/{id}/sync (long poll)  ┌─────────────────────┐
  │ curl / scripts │ ─────────────────────▶│  FastAPI  (uvicorn, 1 proc)   │◀──────────────────────────────────────│ ESP32-S3 SmartPager │
@@ -56,7 +58,7 @@ MQTT would add a broker and buy nothing for a single-user deployment.
   - It never touches the network.
 - **Network task (core 0, 12 KB stack).** Runs a state machine: Wi-Fi up → sync (long poll) → upload events → wait.
   - Network errors back off exponentially with jitter, from 2 s up to 30 s (2 requests/min while the server is down). An authentication error waits 5 min.
-  - Signed firmware updates are checked after the first sync and every 6 h, and installed only on user request (see [DEPLOY_PUBLIC.md](DEPLOY_PUBLIC.md#7-firmware-updates-over-the-air)).
+  - Signed firmware updates are checked after the first sync and every 6 h, and installed only on user request (see [GUIDE.md](GUIDE.md#8-firmware-updates)).
   - New messages are announced to the UI through a FreeRTOS queue, which triggers the banner and wakes the backlight.
   - User actions (read, ack, "sync now") call `net::kick()` to wake the task.
 - **Shared state:** `g_store` and `g_status` behind one mutex. Flash writes happen **outside** the lock: the store is serialized under the lock, then written without it.
