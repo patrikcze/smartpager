@@ -251,6 +251,7 @@ curl -X POST https://pager.example.com/api/v1/messages \
 ```
 
 - **Retries:** give each event a unique `external_id`, so a retried request never pages you twice.
+- **More than one pager:** by default every message goes to every pager. Add `"to": ["pager-2"]` to send to specific ones. Or give a service a token that pages only certain pagers: `make ingest-token NAME=grafana TO=pager-2`. Change that later, keeping the same token, with `make ingest-route NAME=grafana TO=pager-1,pager-2` (or `TO=all`). In the console (§8) pick recipients under *To*. If one recipient reads or acknowledges a message, it shows as read or acknowledged on all of them.
 - **No custom headers:** services that can't set headers can post to `https://pager.example.com/api/v1/webhooks/generic?token=spi_…`. Only ingest tokens work in URLs.
 - **Leaked token:** revoke just that one, in the console (§8) or with `docker compose exec smartpager smartpager-admin ingest-revoke backup-script`.
 - **More formats:** see [API.md](API.md) and [INTEGRATIONS.md](INTEGRATIONS.md) (Alertmanager, e-mail).
@@ -296,7 +297,7 @@ Run these on the server:
 | New admin token | `make rotate-secrets` |
 | Lost or stolen pager | `make rotate ID=pager-1`, immediately |
 | Remove a pager | `docker compose exec smartpager smartpager-admin device-delete pager-1` |
-| Update the server software | `git pull && make up-public` |
+| Update the server software | `make backup && git pull && make up-public` (database upgrades run automatically on start) |
 | Stop everything | `make down` (data and certificates are kept in Docker volumes) |
 
 ### Backups and recovery

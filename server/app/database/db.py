@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -89,6 +89,19 @@ MIGRATIONS: dict[int, str] = {
     );
     CREATE INDEX ix_audit_at ON audit_log(at);
     ALTER TABLE messages ADD COLUMN origin TEXT;
+    """,
+    # Addressing: recipients is a JSON array of device ids, NULL = every device. Deliveries
+    # record which device received which message (messages.delivered_at stays "first delivery").
+    3: """
+    ALTER TABLE messages ADD COLUMN recipients TEXT;
+    ALTER TABLE ingest_tokens ADD COLUMN recipients TEXT;
+    CREATE TABLE deliveries (
+        message_id   INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        device_id    TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+        delivered_at TEXT NOT NULL,
+        PRIMARY KEY (message_id, device_id)
+    ) WITHOUT ROWID;
+    CREATE INDEX ix_deliveries_device ON deliveries(device_id);
     """,
 }
 

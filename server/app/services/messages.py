@@ -35,7 +35,46 @@ def to_unix(value: str | None) -> int:
     return int(datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
 
 
-def row_to_message(row: sqlite3.Row) -> Message:
+# A message is visible to a device when it has no recipient list or lists that device.
+# Every query that serves a device goes through this condition (parameter :device).
+VISIBLE_TO_DEVICE = """(messages.recipients IS NULL
+    OR EXISTS (SELECT 1 FROM json_each(messages.recipients) WHERE value = :device))"""
+
+
+class UnknownDevices(ValueError):
+    """Raised when a recipient list names devices that are not registered."""
+
+    def __init__(self, ids: list[str]) -> None:
+        super().__init__("unknown device(s): " + ", ".join(ids))
+        self.ids = ids
+
+
+def check_recipients(conn: sqlite3.Connection, ids: list[str] | None) -> str | None:
+    """Validate a recipient list and return it as stored (JSON, or None for every device)."""
+    if ids is None:
+        return None
+    marks = ",".join("?" * len(ids))
+    known = {r[0] for r in conn.execute(f"SELECT id FROM devices WHERE id IN ({marks})", ids)}
+    missing = [i for i in ids if i not in known]
+    if missing:
+        raise UnknownDevices(missing)
+    return json.dumps(sorted(ids))
+
+
+def deliveries_for(conn: sqlite3.Connection, message_ids: list[int]) -> dict[int, dict[str, str]]:
+    out: dict[int, dict[str, str]] = {}
+    if not message_ids:
+        return out
+    marks = ",".join("?" * len(message_ids))
+    for r in conn.execute(
+        f"SELECT message_id, device_id, delivered_at FROM deliveries WHERE message_id IN ({marks}) "
+        "ORDER BY device_id", message_ids,
+    ):
+        out.setdefault(r["message_id"], {})[r["device_id"]] = r["delivered_at"]
+    return out
+
+
+def row_to_message(row: sqlite3.Row, delivered_to: dict[str, str] | None = None) -> Message:
     return Message(
         id=row["id"], seq=row["seq"], source=row["source"], external_id=row["external_id"],
         sender=row["sender"], subject=row["subject"], body=row["body"],
@@ -44,14 +83,24 @@ def row_to_message(row: sqlite3.Row) -> Message:
         delivered_at=row["delivered_at"], read_at=row["read_at"],
         acknowledged_at=row["acknowledged_at"], deleted_at=row["deleted_at"],
         metadata=json.loads(row["metadata"]), origin=row["origin"],
+        recipients=json.loads(row["recipients"]) if row["recipients"] else None,
+        delivered_to=delivered_to or {},
     )
+
+
+def rows_to_messages(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Message]:
+    delivered = deliveries_for(conn, [r["id"] for r in rows])
+    return [row_to_message(r, delivered.get(r["id"])) for r in rows]
 
 
 # ---------------------------------------------------------------- messages
 
 def create_message(conn: sqlite3.Connection, data: MessageCreate,
-                   idempotency_key: str | None = None, origin: str | None = None) -> tuple[sqlite3.Row, bool]:
-    """Insert a message. Returns (row, duplicate). Idempotent on (source, external_id)."""
+                   idempotency_key: str | None = None, origin: str | None = None,
+                   default_recipients: list[str] | None = None) -> tuple[sqlite3.Row, bool]:
+    """Insert a message. Returns (row, duplicate). Idempotent on (source, external_id).
+    Recipients: `data.to` if given, else `default_recipients` (the sending token's), else
+    every device. Raises UnknownDevices for unregistered ids."""
     external_id = data.external_id or (f"idem:{idempotency_key}" if idempotency_key else None)
     now = utcnow()
     with write_tx(conn):
@@ -62,15 +111,16 @@ def create_message(conn: sqlite3.Connection, data: MessageCreate,
             ).fetchone()
             if existing is not None:
                 return existing, True
+        recipients = check_recipients(conn, data.to if data.to is not None else default_recipients)
         seq = next_seq(conn)
         row = conn.execute(
             """INSERT INTO messages(seq, source, external_id, sender, subject, body, priority,
-                                    created_at, received_at, expires_at, metadata, origin)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *""",
+                                    created_at, received_at, expires_at, metadata, origin, recipients)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *""",
             (seq, data.source.value, external_id, data.sender, data.subject, data.body,
              PRIORITY_TO_INT[data.priority], iso(data.created_at or now), iso(now),
              iso(data.expires_at) if data.expires_at else None,
-             json.dumps(data.metadata, ensure_ascii=False), origin),
+             json.dumps(data.metadata, ensure_ascii=False), origin, recipients),
         ).fetchone()
     return row, False
 
@@ -80,21 +130,25 @@ def get_message(conn: sqlite3.Connection, message_id: int) -> sqlite3.Row | None
 
 
 def list_messages(conn: sqlite3.Connection, *, source: str | None, unread_only: bool,
-                  include_deleted: bool, before_id: int | None, limit: int) -> list[sqlite3.Row]:
-    where, args = [], []
+                  include_deleted: bool, before_id: int | None, limit: int,
+                  device: str | None = None) -> list[sqlite3.Row]:
+    where: list[str] = []
+    args: dict[str, Any] = {}
+    if device:
+        where.append(VISIBLE_TO_DEVICE); args["device"] = device
     if source:
-        where.append("source = ?"); args.append(source)
+        where.append("source = :source"); args["source"] = source
     if unread_only:
         where.append("read_at IS NULL")
     if not include_deleted:
         where.append("deleted_at IS NULL")
     if before_id:
-        where.append("id < ?"); args.append(before_id)
+        where.append("id < :before"); args["before"] = before_id
     sql = "SELECT * FROM messages"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY id DESC LIMIT ?"
-    args.append(limit)
+    sql += " ORDER BY id DESC LIMIT :limit"
+    args["limit"] = limit
     return conn.execute(sql, args).fetchall()
 
 
@@ -188,10 +242,10 @@ def _truncate_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
     return raw[:max_bytes].decode("utf-8", errors="ignore"), True
 
 
-def sync(conn: sqlite3.Connection, *, cursor: int, epoch: str | None, limit: int,
+def sync(conn: sqlite3.Connection, *, device_id: str, cursor: int, epoch: str | None, limit: int,
          max_body: int) -> SyncResponse:
-    """Return changes after `cursor`, oldest first. Runs in one read transaction so the
-    page, the cursor and the unread counter are a consistent snapshot."""
+    """Return changes visible to `device_id` after `cursor`, oldest first. Runs in one read
+    transaction so the page, the cursor and the unread counter are a consistent snapshot."""
     conn.execute("BEGIN")
     try:
         db_epoch = get_meta(conn, "epoch")
@@ -207,11 +261,14 @@ def sync(conn: sqlite3.Connection, *, cursor: int, epoch: str | None, limit: int
         # From cursor 0 the device has nothing cached, so tombstones are irrelevant.
         deleted_filter = "AND deleted_at IS NULL" if cursor == 0 else ""
         rows = conn.execute(
-            f"SELECT * FROM messages WHERE seq > ? {deleted_filter} ORDER BY seq LIMIT ?",
-            (cursor, limit + 1),
+            f"""SELECT * FROM messages WHERE seq > :cursor {deleted_filter} AND {VISIBLE_TO_DEVICE}
+                ORDER BY seq LIMIT :limit""",
+            {"cursor": cursor, "limit": limit + 1, "device": device_id},
         ).fetchall()
         unread = conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL AND read_at IS NULL"
+            f"""SELECT COUNT(*) FROM messages
+                WHERE deleted_at IS NULL AND read_at IS NULL AND {VISIBLE_TO_DEVICE}""",
+            {"device": device_id},
         ).fetchone()[0]
     finally:
         conn.execute("COMMIT")
@@ -229,9 +286,9 @@ def sync(conn: sqlite3.Connection, *, cursor: int, epoch: str | None, limit: int
             body=body, trunc=trunc, pri=r["priority"], ts=to_unix(r["created_at"]),
             read=to_unix(r["read_at"]), ack=to_unix(r["acknowledged_at"]),
         ))
-    # With an empty page the cursor stays where it was; when everything after the cursor was
-    # filtered (reset snapshot) we still advance to the newest seq we are aware of.
-    new_cursor = rows[-1]["seq"] if rows else (current if cursor == 0 else cursor)
+    # A complete page covers every change up to `current` in this snapshot (the rest is
+    # addressed to other devices, or tombstones skipped on a reset), so the cursor moves there.
+    new_cursor = rows[-1]["seq"] if has_more else current
     return SyncResponse(epoch=db_epoch, server_time=int(utcnow().timestamp()), reset=reset,
                         cursor=new_cursor, has_more=has_more, unread=unread, items=items)
 
@@ -297,9 +354,17 @@ def apply_device_events(conn: sqlite3.Connection, device_id: str,
             if req.ack_cursor > prev and req.ack_cursor <= current_seq(conn):
                 conn.execute("UPDATE devices SET acked_cursor = ? WHERE id = ?", (req.ack_cursor, device_id))
                 # delivery is server-side bookkeeping only: it does not create a sync change
+                span = {"prev": prev, "upto": req.ack_cursor, "device": device_id, "now": iso(now)}
                 conn.execute(
-                    "UPDATE messages SET delivered_at = ? WHERE delivered_at IS NULL AND seq <= ?",
-                    (iso(now), req.ack_cursor),
+                    f"""INSERT OR IGNORE INTO deliveries(message_id, device_id, delivered_at)
+                        SELECT id, :device, :now FROM messages
+                        WHERE seq > :prev AND seq <= :upto AND deleted_at IS NULL AND {VISIBLE_TO_DEVICE}""",
+                    span,
+                )
+                conn.execute(
+                    f"""UPDATE messages SET delivered_at = :now
+                        WHERE delivered_at IS NULL AND seq > :prev AND seq <= :upto AND {VISIBLE_TO_DEVICE}""",
+                    span,
                 )
         for ev in req.events:
             inserted = conn.execute(
@@ -313,7 +378,11 @@ def apply_device_events(conn: sqlite3.Connection, device_id: str,
             at = datetime.fromtimestamp(ev.at, timezone.utc) if ev.at else now
             if at > now:  # never trust a device clock that runs ahead
                 at = now
-            if _set_state(conn, ev.message_id, ev.type, at) is None:
+            visible = conn.execute(
+                f"SELECT 1 FROM messages WHERE id = :id AND {VISIBLE_TO_DEVICE}",
+                {"id": ev.message_id, "device": device_id},
+            ).fetchone()
+            if visible is None or _set_state(conn, ev.message_id, ev.type, at) is None:
                 unknown.append(ev.id)
             else:
                 accepted.append(ev.id)

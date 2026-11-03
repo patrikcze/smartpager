@@ -22,6 +22,8 @@ from ..models.schemas import (
     IngestTokenCreate,
     IngestTokenCreated,
     IngestTokenInfo,
+    IngestTokenUpdate,
+    DEVICE_ID_PATTERN,
     Message,
     MessageCreate,
     MessageCreated,
@@ -44,28 +46,43 @@ def _audit(conn: sqlite3.Connection, request: Request, actor: str, action: str, 
     security.audit(conn, actor, action, target, client_ip(request))
 
 
+def _out(conn: sqlite3.Connection, row: sqlite3.Row) -> Message:
+    return svc.rows_to_messages(conn, [row])[0]
+
+
+def _unknown_devices(e: svc.UnknownDevices) -> HTTPException:
+    return HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+
+
 # ---------------------------------------------------------------- messages (admin / ingest)
 
 @router.post("/messages", response_model=MessageCreated, status_code=status.HTTP_201_CREATED)
 def create_message(body: MessageCreate, request: Request, response: Response,
                    idempotency_key: str | None = Header(default=None, max_length=100),
                    actor: str = Depends(require_ingest), conn: sqlite3.Connection = Depends(get_conn)):
-    row, duplicate = svc.create_message(conn, body, idempotency_key, origin=actor)
+    try:
+        row, duplicate = svc.create_message(conn, body, idempotency_key, origin=actor,
+                                            default_recipients=security.ingest_recipients(conn, actor))
+    except svc.UnknownDevices as e:
+        raise _unknown_devices(e)
     if duplicate:
         response.status_code = status.HTTP_200_OK
     else:
         _notify(request)
-    return MessageCreated(message=svc.row_to_message(row), duplicate=duplicate)
+    return MessageCreated(message=_out(conn, row), duplicate=duplicate)
 
 
 @router.get("/messages", response_model=MessageList)
 def list_messages(source: Source | None = None, unread: bool = False, include_deleted: bool = False,
                   before_id: int | None = Query(default=None, ge=1),
                   limit: int = Query(default=50, ge=1, le=200),
+                  device: str | None = Query(default=None, max_length=40, pattern=DEVICE_ID_PATTERN,
+                                             description="only messages this device receives"),
                   _: str = Depends(require_admin), conn: sqlite3.Connection = Depends(get_conn)):
     rows = svc.list_messages(conn, source=source.value if source else None, unread_only=unread,
-                             include_deleted=include_deleted, before_id=before_id, limit=limit)
-    return MessageList(messages=[svc.row_to_message(r) for r in rows],
+                             include_deleted=include_deleted, before_id=before_id, limit=limit,
+                             device=device)
+    return MessageList(messages=svc.rows_to_messages(conn, rows),
                        next_before_id=rows[-1]["id"] if len(rows) == limit else None)
 
 
@@ -79,7 +96,7 @@ def _existing(conn: sqlite3.Connection, message_id: int) -> sqlite3.Row:
 @router.get("/messages/{message_id}", response_model=Message)
 def get_message(message_id: int, _: str = Depends(require_admin),
                 conn: sqlite3.Connection = Depends(get_conn)):
-    return svc.row_to_message(_existing(conn, message_id))
+    return _out(conn, _existing(conn, message_id))
 
 
 @router.post("/messages/{message_id}/read", response_model=Message)
@@ -89,7 +106,7 @@ def mark_read(message_id: int, request: Request, actor: str = Depends(require_ad
     row = svc.mark_message(conn, message_id, "read")
     _audit(conn, request, actor, "message.read", f"message:{message_id}")
     _notify(request)
-    return svc.row_to_message(row)
+    return _out(conn, row)
 
 
 @router.post("/messages/{message_id}/ack", response_model=Message)
@@ -99,7 +116,7 @@ def mark_ack(message_id: int, request: Request, actor: str = Depends(require_adm
     row = svc.mark_message(conn, message_id, "ack")
     _audit(conn, request, actor, "message.ack", f"message:{message_id}")
     _notify(request)
-    return svc.row_to_message(row)
+    return _out(conn, row)
 
 
 @router.delete("/messages/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -160,8 +177,8 @@ async def device_sync(device_id: str, request: Request,
     deadline = time.monotonic() + min(wait, request.app.state.settings.max_long_poll_s)
     while True:
         token = notifier.token()
-        result = await run_in_threadpool(svc.sync, conn, cursor=cursor, epoch=epoch,
-                                         limit=limit, max_body=max_body)
+        result = await run_in_threadpool(svc.sync, conn, device_id=device_id, cursor=cursor,
+                                         epoch=epoch, limit=limit, max_body=max_body)
         remaining = deadline - time.monotonic()
         if result.items or result.reset or remaining <= 0:
             return result
@@ -190,13 +207,31 @@ def list_tokens(_: str = Depends(require_admin), conn: sqlite3.Connection = Depe
 @router.post("/tokens", response_model=IngestTokenCreated, status_code=status.HTTP_201_CREATED)
 def create_token(body: IngestTokenCreate, request: Request, actor: str = Depends(require_admin),
                  conn: sqlite3.Connection = Depends(get_conn)):
-    """Create a named ingest token for one integration. The token is returned only here."""
+    """Create a named ingest token for one integration. The token is returned only here.
+    `recipients` sets where its messages go when they don't say (`to`); omitted = every device."""
     try:
-        row, token = security.create_ingest_token(conn, body.name)
+        row, token = security.create_ingest_token(conn, body.name, body.recipients)
     except sqlite3.IntegrityError:
         raise HTTPException(status.HTTP_409_CONFLICT, "a token with this name exists")
+    except svc.UnknownDevices as e:
+        raise _unknown_devices(e)
     _audit(conn, request, actor, "token.create", f"token:{body.name}")
     return IngestTokenCreated(token_info=security.token_to_dict(row), token=token)
+
+
+@router.patch("/tokens/{token_id}", response_model=IngestTokenInfo)
+def update_token(token_id: int, body: IngestTokenUpdate, request: Request,
+                 actor: str = Depends(require_admin), conn: sqlite3.Connection = Depends(get_conn)):
+    """Change a token's default recipients (null = every device). The token itself stays valid."""
+    try:
+        row = security.set_ingest_recipients(conn, token_id, body.recipients)
+    except svc.UnknownDevices as e:
+        raise _unknown_devices(e)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "token not found")
+    _audit(conn, request, actor, "token.recipients",
+           f"token:{row['name']} to:{','.join(body.recipients) if body.recipients else 'all'}")
+    return security.token_to_dict(row)
 
 
 @router.delete("/tokens/{token_id}", response_model=IngestTokenInfo)

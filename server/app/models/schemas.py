@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -13,6 +13,16 @@ MAX_SUBJECT = 200
 MAX_BODY = 4000
 MAX_METADATA_BYTES = 2048
 SYNC_SCHEMA = 1
+MAX_RECIPIENTS = 20
+DEVICE_ID_PATTERN = r"^[a-z0-9][a-z0-9-]+$"
+
+DeviceId = Annotated[str, Field(min_length=3, max_length=40, pattern=DEVICE_ID_PATTERN)]
+# None = every device; otherwise the listed device ids (at least one).
+Recipients = Annotated[list[DeviceId] | None, Field(default=None, min_length=1, max_length=MAX_RECIPIENTS)]
+
+
+def _unique_sorted(v: list[str] | None) -> list[str] | None:
+    return sorted(set(v)) if v is not None else None
 
 
 class Source(str, Enum):
@@ -52,6 +62,12 @@ class MessageCreate(BaseModel):
     created_at: datetime | None = None
     expires_at: datetime | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    to: Recipients = None  # device ids; omitted = the sending token's default, else every device
+
+    @field_validator("to")
+    @classmethod
+    def _dedupe(cls, v: list[str] | None) -> list[str] | None:
+        return _unique_sorted(v)
 
     @field_validator("sender", "subject", "body")
     @classmethod
@@ -91,6 +107,8 @@ class Message(BaseModel):
     deleted_at: str | None
     metadata: dict[str, Any]
     origin: str | None = None  # which credential created it: "admin", "ingest", "token:<name>"
+    recipients: list[str] | None = None  # None = every device
+    delivered_to: dict[str, str] = Field(default_factory=dict)  # device id -> delivery time
 
 
 class MessageCreated(BaseModel):
@@ -160,7 +178,7 @@ class DeviceEventsResponse(BaseModel):
 
 class DeviceCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    id: str = Field(min_length=3, max_length=40, pattern=r"^[a-z0-9][a-z0-9-]+$")
+    id: DeviceId
     name: str = Field(default="SmartPager", max_length=60)
 
 
@@ -184,6 +202,22 @@ class DeviceCreated(BaseModel):
 class IngestTokenCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=2, max_length=40, pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._-]+$")
+    recipients: Recipients = None  # default `to` for messages sent with this token
+
+    @field_validator("recipients")
+    @classmethod
+    def _dedupe(cls, v: list[str] | None) -> list[str] | None:
+        return _unique_sorted(v)
+
+
+class IngestTokenUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    recipients: Recipients = None  # null = every device
+
+    @field_validator("recipients")
+    @classmethod
+    def _dedupe(cls, v: list[str] | None) -> list[str] | None:
+        return _unique_sorted(v)
 
 
 class IngestTokenInfo(BaseModel):
@@ -192,6 +226,7 @@ class IngestTokenInfo(BaseModel):
     created_at: str
     last_used_at: str | None
     revoked_at: str | None
+    recipients: list[str] | None = None
 
 
 class IngestTokenCreated(BaseModel):

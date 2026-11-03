@@ -19,7 +19,7 @@ All external traffic enters through **Caddy** (HTTPS, Let's Encrypt, path allow-
 |---|---|
 | `config.py` | Environment settings. Refuses to start without two distinct secrets of at least 24 characters |
 | `database/db.py` | Connections, `BEGIN IMMEDIATE` write transactions, the global change sequence, numbered migrations (`PRAGMA user_version`) |
-| `services/messages.py` | All persistence logic: create (idempotent), read/ack (monotonic), tombstones, retention purge, sync paging, device events, device tokens (SHA-256) |
+| `services/messages.py` | All persistence logic: create (idempotent), recipients (per-pager addressing and delivery), read/ack (monotonic), tombstones, retention purge, sync paging, device events, device tokens (SHA-256) |
 | `services/notifier.py` | `asyncio.Event` swap used to wake long-poll requests. The token is taken before the query, so no wake-up is lost |
 | `api/routes.py`, `api/deps.py` | HTTP layer, bearer auth, bounded token-bucket rate limiter |
 | `integrations/` | Webhook adapters (in-process) and the IMAP connector (separate process) |

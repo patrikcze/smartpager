@@ -47,6 +47,10 @@ button:disabled{opacity:.5;cursor:default}
 .toast.show{opacity:1}
 code.tok{display:block;word-break:break-all;background:#0f1117;padding:8px;border-radius:8px;margin-top:6px;color:var(--warn)}
 #login{max-width:420px;margin:12vh auto;padding:0 16px}
+.to{display:flex;gap:6px;flex-wrap:wrap}
+.to label{display:flex;align-items:center;gap:5px;margin:0;padding:5px 10px;border:1px solid var(--line);border-radius:999px;background:#0f1117;color:var(--sub);cursor:pointer;font-size:12px}
+.to input{width:auto;margin:0}
+.to label:has(input:checked){border-color:var(--accent);color:var(--text)}
 </style>
 </head>
 <body>
@@ -69,10 +73,11 @@ code.tok{display:block;word-break:break-all;background:#0f1117;padding:8px;borde
           <div><label>Source</label><select name="source"><option>manual</option><option>system</option><option>monitoring</option><option>webhook</option><option>email</option><option>imessage</option></select></div>
           <div><label>Priority</label><select name="priority"><option>low</option><option selected>normal</option><option>high</option><option>critical</option></select></div>
         </div>
+        <label>To</label><div class="to" id="toPick"></div>
         <label>Sender</label><input name="sender" maxlength="120" placeholder="Ops">
         <label>Subject</label><input name="subject" maxlength="200" placeholder="Backup completed">
         <label>Message</label><textarea name="body" maxlength="4000" placeholder="Type a message…"></textarea>
-        <div style="margin-top:12px"><button id="sendBtn">Send to pager</button></div>
+        <div style="margin-top:12px"><button id="sendBtn">Send</button></div>
       </form>
     </section>
     <section>
@@ -85,7 +90,8 @@ code.tok{display:block;word-break:break-all;background:#0f1117;padding:8px;borde
       <h2>Integration tokens</h2>
       <p style="color:var(--dim);margin:-4px 0 10px;font-size:12px">One ingest token per script or service, so a leaked one can be revoked alone.</p>
       <div id="tokens"></div>
-      <form id="newIngest" class="row" style="margin-top:10px"><input name="name" placeholder="name (e.g. grafana)" pattern="[A-Za-z0-9][A-Za-z0-9 ._-]+" minlength="2" maxlength="40" required><button class="ghost" style="flex:0 0 auto">Create</button></form>
+      <form id="newIngest" style="margin-top:10px"><div class="row"><input name="name" placeholder="name (e.g. grafana)" pattern="[A-Za-z0-9][A-Za-z0-9 ._-]+" minlength="2" maxlength="40" required><button class="ghost" style="flex:0 0 auto">Create</button></div>
+        <input name="to" placeholder="sends to (optional, e.g. pager-2; empty = every pager)" style="margin-top:8px"></form>
       <div id="newIngestTok"></div>
     </section>
     <section>
@@ -98,6 +104,7 @@ code.tok{display:block;word-break:break-all;background:#0f1117;padding:8px;borde
     <div class="filters">
       <select id="fSource"><option value="">All sources</option><option>manual</option><option>system</option><option>monitoring</option><option>webhook</option><option>email</option><option>imessage</option></select>
       <select id="fUnread"><option value="">All</option><option value="1">Unread</option></select>
+      <select id="fDevice"><option value="">All pagers</option></select>
     </div>
     <div id="list"></div>
   </section>
@@ -132,9 +139,30 @@ async function refresh(){
   const q = new URLSearchParams({limit:'100'});
   if($('#fSource').value) q.set('source',$('#fSource').value);
   if($('#fUnread').value) q.set('unread','true');
+  if($('#fDevice').value) q.set('device',$('#fDevice').value);
   const [msgs, devs, toks, aud] = await Promise.all([api('/api/v1/messages?'+q), api('/api/v1/devices'),
     api('/api/v1/tokens'), api('/api/v1/audit?limit=15')]);
-  renderList(msgs.messages); renderDevices(devs); renderTokens(toks); renderAudit(aud);
+  renderList(msgs.messages); renderDevices(devs); renderTokens(toks); renderAudit(aud); renderTo(devs);
+}
+
+// Recipient picker: "All pagers" or any set of devices. Re-rendered on refresh, keeping choices.
+function chosen(){return [...document.querySelectorAll('#toPick input[data-dev]:checked')].map(i=>i.dataset.dev);}
+function renderTo(ds){
+  const keep = new Set(chosen()), ids = ds.map(d=>d.id);
+  $('#toPick').innerHTML = `<label><input type="checkbox" id="toAll" ${keep.size?'':'checked'}>All pagers</label>` +
+    ids.map(id=>`<label><input type="checkbox" data-dev="${esc(id)}" ${keep.has(id)?'checked':''}>${esc(id)}</label>`).join('');
+  const f = $('#fDevice'), cur = f.value;
+  f.innerHTML = '<option value="">All pagers</option>' + ids.map(id=>`<option ${id===cur?'selected':''}>${esc(id)}</option>`).join('');
+}
+$('#toPick').addEventListener('change',e=>{
+  if(e.target.id==='toAll'){ if(e.target.checked) document.querySelectorAll('#toPick input[data-dev]').forEach(i=>i.checked=false); else e.target.checked=true; }
+  else $('#toAll').checked = !chosen().length;
+});
+function toChip(r){return `<span class="chip" title="recipients">→ ${r?esc(r.join(', ')):'all pagers'}</span>`;}
+function deliveredChip(m){
+  const got = Object.keys(m.delivered_to||{});
+  if(!m.recipients) return `<span class="chip ${m.delivered_at?'on':''}" title="${esc(got.join(', ')||'not yet')}">delivered${got.length>1?' ×'+got.length:''}</span>`;
+  return m.recipients.map(d=>`<span class="chip ${got.includes(d)?'on':''}" title="${got.includes(d)?'delivered '+esc(m.delivered_to[d]):'not delivered yet'}">${esc(d)} ${got.includes(d)?'✓':'…'}</span>`).join('');
 }
 
 function renderList(ms){
@@ -144,8 +172,8 @@ function renderList(ms){
     return `<div class="msg ${m.read_at?'':'unread'}">
       <div class="avatar" style="background:${c}22;color:${c}">${esc((m.sender||m.source)[0]||'?').toUpperCase()}</div>
       <div><div class="who">${esc(m.sender||m.source)}</div><div class="subj">${esc(m.subject)}</div><div class="body">${esc(m.body)}</div>
-        <div class="chips"><span class="chip">${esc(m.source)}</span>${m.origin?`<span class="chip" title="created by">${esc(m.origin)}</span>`:''}${p>=2?`<span class="chip p${p}">${m.priority}</span>`:''}
-        <span class="chip ${m.delivered_at?'on':''}">delivered</span><span class="chip ${m.read_at?'on':''}">read</span><span class="chip ${m.acknowledged_at?'on':''}">acknowledged</span></div></div>
+        <div class="chips"><span class="chip">${esc(m.source)}</span>${m.origin?`<span class="chip" title="created by">${esc(m.origin)}</span>`:''}${toChip(m.recipients)}${p>=2?`<span class="chip p${p}">${m.priority}</span>`:''}
+        ${deliveredChip(m)}<span class="chip ${m.read_at?'on':''}">read</span><span class="chip ${m.acknowledged_at?'on':''}">acknowledged</span></div></div>
       <div><div class="meta" title="${esc(m.received_at)}">${ago(m.received_at)} · #${m.id}</div>
         <div class="actions">${m.read_at?'':`<button class="ghost" data-a="read" data-id="${m.id}">Read</button>`}${m.acknowledged_at?'':`<button class="ghost" data-a="ack" data-id="${m.id}">Ack</button>`}<button class="danger" data-a="del" data-id="${m.id}">Delete</button></div></div>
     </div>`}).join('');
@@ -164,28 +192,33 @@ function renderTokens(ts){
   if(!ts.length){$('#tokens').innerHTML='<div class="empty" style="padding:10px 0">No integration tokens</div>';return;}
   $('#tokens').innerHTML = ts.map(t=>`<div class="dev" style="display:flex;align-items:center;gap:8px">
     <div style="flex:1"><b style="${t.revoked_at?'text-decoration:line-through;color:var(--dim)':''}">${esc(t.name)}</b>
-    <div style="color:var(--dim);font-size:12px">${t.revoked_at?'revoked '+ago(t.revoked_at)+' ago':t.last_used_at?'used '+ago(t.last_used_at):'never used'}</div></div>
-    ${t.revoked_at?'':`<button class="danger" data-revoke="${t.id}" data-name="${esc(t.name)}">Revoke</button>`}</div>`).join('');
+    <div style="color:var(--dim);font-size:12px">${t.revoked_at?'revoked '+ago(t.revoked_at)+' ago':(t.last_used_at?'used '+ago(t.last_used_at):'never used')+' · → '+esc(t.recipients?t.recipients.join(', '):'all pagers')}</div></div>
+    ${t.revoked_at?'':`<button class="ghost" data-route="${t.id}" data-name="${esc(t.name)}" data-to="${esc((t.recipients||[]).join(','))}">Route</button><button class="danger" data-revoke="${t.id}" data-name="${esc(t.name)}">Revoke</button>`}</div>`).join('');
 }
 function renderAudit(es){
   $('#audit').innerHTML = es.length ? es.map(e=>`<div style="display:flex;gap:8px;padding:3px 0;border-bottom:1px solid var(--line)">
     <span style="color:var(--dim);min-width:34px">${ago(e.at)}</span><span style="flex:1">${esc(e.action)} <span style="color:var(--dim)">${esc(e.target)}</span></span>
     <span style="color:var(--dim)">${esc(e.actor)}</span></div>`).join('') : '<div class="empty" style="padding:10px 0">No events</div>';
 }
+function devList(v){const ids=String(v||'').split(',').map(x=>x.trim()).filter(Boolean);return ids.length?ids:null;}
+$('#tokens').addEventListener('click',async e=>{const r=e.target.closest('button[data-route]');if(!r)return;
+  const v=prompt('Pagers that messages from "'+r.dataset.name+'" go to (comma-separated; empty = every pager):',r.dataset.to);if(v===null)return;
+  try{await api('/api/v1/tokens/'+r.dataset.route,{method:'PATCH',body:JSON.stringify({recipients:devList(v)})});toast('Updated');refresh();}catch(err){toast(err.message)}});
 $('#tokens').addEventListener('click',async e=>{const b=e.target.closest('button[data-revoke]');if(!b)return;
   if(!confirm('Revoke token "'+b.dataset.name+'"? Integrations using it stop working immediately.'))return;
   try{await api('/api/v1/tokens/'+b.dataset.revoke,{method:'DELETE'});refresh();}catch(err){toast(err.message)}});
 $('#newIngest').addEventListener('submit',async e=>{e.preventDefault();try{
-  const r=await api('/api/v1/tokens',{method:'POST',body:JSON.stringify({name:e.target.name.value.trim()})});
+  const r=await api('/api/v1/tokens',{method:'POST',body:JSON.stringify({name:e.target.name.value.trim(),recipients:devList(e.target.to.value)})});
   $('#newIngestTok').innerHTML=`<label>Token for ${esc(r.token_info.name)} — copy it now, it is not shown again</label><code class="tok">${esc(r.token)}</code>`;
   e.target.reset();refresh();}catch(err){toast(err.message)}});
 
 $('#loginForm').addEventListener('submit',async e=>{e.preventDefault();token=$('#tokenIn').value.trim();
   try{await api('/api/v1/devices');try{sessionStorage.setItem('sp_admin',token)}catch(e){};$('#tokenIn').value='';unlock();}catch(err){toast('Invalid token');}});
 $('#logout').onclick=lock;
-$('#fSource').onchange=refresh;$('#fUnread').onchange=refresh;
+$('#fSource').onchange=refresh;$('#fUnread').onchange=refresh;$('#fDevice').onchange=refresh;
 $('#compose').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);const body=Object.fromEntries(f.entries());
   if(!body.subject&&!body.body){toast('Write a subject or message');return;}
+  const to=chosen(); if(to.length) body.to=to;
   $('#sendBtn').disabled=true;
   try{await api('/api/v1/messages',{method:'POST',body:JSON.stringify(body)});e.target.subject.value='';e.target.body.value='';toast('Sent');refresh();}
   catch(err){toast(err.message)} finally{$('#sendBtn').disabled=false;}});

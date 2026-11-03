@@ -28,6 +28,8 @@ receivers:
 
 Most tools (Home Assistant `rest_command`, Grafana contact points, GitHub Actions, cron jobs) can call the generic webhook or the messages endpoint directly. Tools that can't set an `Authorization` header can use `…/webhooks/generic?token=spi_…`.
 
+**Paging a specific pager.** Add `?to=pager-2` to a webhook URL, `"to": ["pager-2"]` to the JSON, or give the integration a token that defaults to that pager (`make ingest-token NAME=grafana TO=pager-2`). The token default is the simplest for tools like Alertmanager whose payload you can't change, and you can re-route it later without touching the tool (`make ingest-route NAME=grafana TO=pager-1,pager-2`).
+
 ## E-mail via IMAP (implemented, tested offline)
 
 `server/app/integrations/imap_connector.py` runs as its own process. With Docker:

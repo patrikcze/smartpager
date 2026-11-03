@@ -14,7 +14,7 @@ ID        ?= pager-1
 COMPOSE   := docker compose
 LOAD_ENV  := set -a && . ./$(ENV_FILE) && set +a
 
-.PHONY: help env install test run build up up-public logs-caddy down ingest-token audit rotate-secrets ota-keygen ota-sign ota-install ota-publish restart logs ps health device rotate backup restore backup-timer backup-timer-remove backup-pull import-db \
+.PHONY: help env install test run build up up-public logs-caddy down ingest-token ingest-route audit rotate-secrets ota-keygen ota-sign ota-install ota-publish restart logs ps health device rotate backup restore backup-timer backup-timer-remove backup-pull import-db \
         demo fw-build fw-test fw-sim fw-diag fw-flash fw-monitor clean
 
 help: ## Show this help
@@ -137,9 +137,13 @@ import-db: ## Replace the container database with DB=path/to.db (stops the serve
 	  "import os,shutil; [os.remove(p) for p in ('/data/smartpager.db','/data/smartpager.db-wal','/data/smartpager.db-shm') if os.path.exists(p)]; shutil.copyfile('/import/source.db','/data/smartpager.db'); print('database imported')"
 	$(MAKE) up
 
-ingest-token: ## Create a named, revocable ingest token for one integration (NAME=grafana)
-	@test -n "$(NAME)" || { echo "usage: make ingest-token NAME=grafana" >&2; exit 1; }
-	$(COMPOSE) exec smartpager smartpager-admin ingest-create "$(NAME)"
+ingest-token: ## Create a named, revocable ingest token (NAME=grafana [TO=pager-1,pager-2])
+	@test -n "$(NAME)" || { echo "usage: make ingest-token NAME=grafana [TO=pager-1,pager-2]" >&2; exit 1; }
+	$(COMPOSE) exec smartpager smartpager-admin ingest-create "$(NAME)" --to "$(TO)"
+
+ingest-route: ## Change where a token's messages go (NAME=grafana TO=pager-2, or TO=all)
+	@test -n "$(NAME)" -a -n "$(TO)" || { echo "usage: make ingest-route NAME=grafana TO=pager-2 (or TO=all)" >&2; exit 1; }
+	$(COMPOSE) exec smartpager smartpager-admin ingest-route "$(NAME)" $(if $(filter all,$(TO)),--all,--to "$(TO)")
 
 audit: ## Show recent admin/security events
 	$(COMPOSE) exec smartpager smartpager-admin audit --limit 40

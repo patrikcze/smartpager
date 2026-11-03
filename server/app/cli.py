@@ -7,6 +7,8 @@
   python -m app.cli device-delete pager-1      # remove a device and its token
   python -m app.cli purge                      # run retention purge now
   python -m app.cli ingest-create grafana      # named ingest token for one integration (printed once)
+  python -m app.cli ingest-create grafana --to pager-2        # ...whose messages go to pager-2 only
+  python -m app.cli ingest-route grafana --to pager-1,pager-2 # change that later (--all = every pager)
   python -m app.cli ingest-list                # list integration tokens
   python -m app.cli ingest-revoke grafana      # revoke an integration token
   python -m app.cli audit [--limit 50]         # recent admin/security events
@@ -17,14 +19,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import secrets
 import sqlite3
 import sys
 
 from .config import Settings
 from .database.db import connect, migrate, write_tx
+from .models.schemas import DEVICE_ID_PATTERN
 from .services import messages as svc
 from .services import security
+
+
+def _device_list(value: str | None) -> list[str] | None:
+    """"pager-1, pager-2" -> sorted unique ids; empty -> None (every pager)."""
+    ids = sorted({v.strip() for v in (value or "").split(",") if v.strip()})
+    for i in ids:
+        if not re.fullmatch(DEVICE_ID_PATTERN, i) or not 3 <= len(i) <= 40:
+            raise SystemExit(f"invalid device id {i!r}")
+    return ids or None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
     dd = sub.add_parser("device-delete"); dd.add_argument("id")
     sub.add_parser("purge")
     ic = sub.add_parser("ingest-create"); ic.add_argument("name")
+    ic.add_argument("--to", default="", help="comma-separated device ids (default: every pager)")
+    rt = sub.add_parser("ingest-route"); rt.add_argument("name")
+    target = rt.add_mutually_exclusive_group(required=True)
+    target.add_argument("--to", help="comma-separated device ids")
+    target.add_argument("--all", action="store_true", help="every pager")
     sub.add_parser("ingest-list")
     ir = sub.add_parser("ingest-revoke"); ir.add_argument("name")
     au = sub.add_parser("audit"); au.add_argument("--limit", type=int, default=50)
@@ -79,13 +97,33 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "purge":
             print(svc.purge(conn, s.retention_days, s.tombstone_days))
         elif args.cmd == "ingest-create":
+            to = _device_list(args.to)
             try:
-                _, token = security.create_ingest_token(conn, args.name)
+                _, token = security.create_ingest_token(conn, args.name, to)
             except sqlite3.IntegrityError:
                 print(f"token {args.name!r} already exists (revoke it first)", file=sys.stderr)
                 return 1
+            except svc.UnknownDevices as e:
+                print(e, file=sys.stderr)
+                return 1
             security.audit(conn, "cli", "token.create", f"token:{args.name}")
-            print(f"name:   {args.name}\ntoken:  {token}\n(store it now; only its hash is kept)")
+            print(f"name:   {args.name}\nto:     {', '.join(to) if to else 'every pager'}\n"
+                  f"token:  {token}\n(store it now; only its hash is kept)")
+        elif args.cmd == "ingest-route":
+            row = conn.execute("SELECT id FROM ingest_tokens WHERE name = ? AND revoked_at IS NULL",
+                               (args.name,)).fetchone()
+            if row is None:
+                print("token not found", file=sys.stderr)
+                return 1
+            to = None if args.all else _device_list(args.to)
+            try:
+                security.set_ingest_recipients(conn, row["id"], to)
+            except svc.UnknownDevices as e:
+                print(e, file=sys.stderr)
+                return 1
+            security.audit(conn, "cli", "token.recipients",
+                           f"token:{args.name} to:{','.join(to) if to else 'all'}")
+            print(f"{args.name}: messages go to {', '.join(to) if to else 'every pager'}")
         elif args.cmd == "ingest-list":
             for row in security.list_ingest_tokens(conn):
                 print(json.dumps(security.token_to_dict(row)))

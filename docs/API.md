@@ -26,14 +26,17 @@ Errors use FastAPI's shape: `{"detail": ...}`. The status codes are 401 (missing
   "priority": "high",                // low|normal|high|critical (default normal)
   "created_at": "2026-11-02T14:00:00Z",   // optional, must carry a timezone
   "expires_at": "2026-11-03T14:00:00Z",   // optional; expired messages turn into tombstones
-  "metadata": {"k": "v"}             // optional, ≤ 2 KiB JSON
+  "metadata": {"k": "v"},            // optional, ≤ 2 KiB JSON
+  "to": ["pager-2"]                  // optional recipients (1–20 registered device ids)
 }
 ```
+
+**Recipients.** Without `to`, the message goes to the sending token's default recipients (see *Integration tokens*), and otherwise to every pager. With `to`, only the listed pagers receive it: the others never download it, and it doesn't count in their unread badge. Unknown device ids are rejected with 422. Read and acknowledged are shared: if any recipient opens or acknowledges a message, it counts as read or acknowledged for all of them.
 
 Returns **201** `{"message": {...}, "duplicate": false}`. If the message already exists it returns **200** with the original message and `"duplicate": true`. Without `external_id`, an `Idempotency-Key` header gives the same retry safety.
 
 ### `GET /api/v1/messages` (admin)
-Query parameters: `source`, `unread=true`, `include_deleted=true`, `limit` (1–200, default 50) and `before_id`. Results are ordered newest first. When there may be more, use `next_before_id` for the next page.
+Query parameters: `source`, `unread=true`, `include_deleted=true`, `device` (only messages that pager receives), `limit` (1–200, default 50) and `before_id`. Results are ordered newest first. When there may be more, use `next_before_id` for the next page.
 
 ### `GET /api/v1/messages/{id}` · `POST .../{id}/read` · `POST .../{id}/ack` · `DELETE .../{id}` (admin)
 - `read` and `ack` are idempotent. The first timestamp is kept and repeating the call creates no new change. `ack` implies `read`.
@@ -43,7 +46,9 @@ Message states are tracked separately:
 
 | Field | Set when |
 |---|---|
-| `delivered_at` | a device confirmed (`ack_cursor`) a sync cursor that covers the message, after saving it to flash |
+| `delivered_at` | the first device confirmed (`ack_cursor`) a sync cursor that covers the message, after saving it to flash |
+| `delivered_to` | per pager: `{"pager-1": "2026-11-03T14:00:05Z", …}` (deliveries before server schema v3 are only in `delivered_at`) |
+| `recipients` | the addressed pagers, or `null` for every pager |
 | `read_at` | the user opened it on the device, or an admin marked it read |
 | `acknowledged_at` | the user explicitly acknowledged it (long-press on the device), or an admin did |
 
@@ -51,8 +56,10 @@ Message states are tracked separately:
 
 Authenticate with `Authorization: Bearer <ingest token>`. For senders that can't set headers, use `?token=<ingest token>`, which is accepted only here and never for the admin token.
 
-- `POST /api/v1/webhooks/generic`: `{"title", "message", "sender", "priority", "id"}`. Extra fields are ignored and long fields are clipped.
+- `POST /api/v1/webhooks/generic`: `{"title", "message", "sender", "priority", "id", "to"}`. Extra fields are ignored and long fields are clipped. `to` is a list or a comma-separated string of device ids.
 - `POST /api/v1/webhooks/alertmanager`: Prometheus Alertmanager v4 payloads. `severity=critical|page` maps to priority critical, other firing alerts to high, and resolved alerts to low. Re-deliveries are deduplicated.
+
+Both accept `?to=pager-1,pager-2` to address specific pagers (Alertmanager can't change its payload, so it needs the query parameter or a token with default recipients).
 
 ## Devices (admin)
 
@@ -62,8 +69,9 @@ Authenticate with `Authorization: Bearer <ingest token>`. For senders that can't
 
 ## Integration tokens and audit (admin)
 
-- `GET /api/v1/tokens`: name, created, last used, revoked. Hashes and secrets are never returned.
-- `POST /api/v1/tokens` `{"name": "grafana"}` → `{"token_info": {...}, "token": "spi_…"}`. The token is shown only in this response.
+- `GET /api/v1/tokens`: name, created, last used, revoked, recipients. Hashes and secrets are never returned.
+- `POST /api/v1/tokens` `{"name": "grafana", "recipients": ["pager-2"]}` → `{"token_info": {...}, "token": "spi_…"}`. The token is shown only in this response. `recipients` is optional: messages sent with this token that don't specify `to` go only to those pagers.
+- `PATCH /api/v1/tokens/{id}` `{"recipients": ["pager-1"]}` (or `null` for every pager) changes that default without issuing a new token.
 - `DELETE /api/v1/tokens/{id}` revokes it immediately. The name can be reused afterwards.
 - `GET /api/v1/audit?limit=100`: `{id, at, actor, action, target, ip}`, newest first.
 
@@ -112,6 +120,8 @@ Times are Unix seconds UTC, and `0` means unset. `pri` runs from 0 (low) to 3 (c
 - the cursor is ahead of the server (backup restored).
 
 A reset response, and any sync from cursor 0, contains only live messages and no tombstones.
+
+**Addressed messages.** A device only receives changes to messages addressed to it (or to every pager), and `unread` counts only those. When a page is complete (`has_more: false`), `cursor` is the server's current sequence even if the last changes were for other pagers, so the device doesn't fetch them again. Read and ack events for a message the device doesn't receive are answered as `unknown_messages`.
 
 **Device algorithm:**
 1. GET sync. Validate the whole page.
