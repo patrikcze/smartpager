@@ -10,6 +10,7 @@ cd "$(dirname "$0")/.."
 host=${1:-}
 [ -n "$host" ] || { echo "usage: make backup-pull HOST=user@server [SSH_KEY=~/.ssh/key]" >&2; exit 1; }
 remote_dir=${REMOTE_DIR:-smartpager}
+SSH_KEY=${SSH_KEY/#\~/$HOME}   # zsh passes "SSH_KEY=~/…" to make without expanding ~
 ssh_opts=(-o BatchMode=yes)
 [ -n "${SSH_KEY:-}" ] && ssh_opts+=(-i "$SSH_KEY")
 
@@ -18,7 +19,11 @@ dest="backups/${host#*@}"
 mkdir -p "$dest"
 chmod 700 backups "$dest"
 
-remote=$(ssh "${ssh_opts[@]}" "$host" "cd '$remote_dir/backups' 2>/dev/null && ls -1 smartpager-*.tar.gz 2>/dev/null" || true)
+if ! remote=$(ssh "${ssh_opts[@]}" "$host" "cd '$remote_dir/backups' 2>/dev/null && ls -1 smartpager-*.tar.gz 2>/dev/null; true"); then
+  echo "could not connect to $host over SSH (see the error above)." >&2
+  echo "First connection to this name? Run once interactively to accept its host key: ssh${SSH_KEY:+ -i $SSH_KEY} $host" >&2
+  exit 1
+fi
 [ -n "$remote" ] || { echo "no backups on $host:$remote_dir/backups — run 'make backup' there" >&2; exit 1; }
 
 new=0

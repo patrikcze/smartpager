@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 backups/
+backup/
+*.tar.gz
 # OTA signing key (private) and the per-owner public key header
 secrets/
 firmware/include/ota_pubkey.h
