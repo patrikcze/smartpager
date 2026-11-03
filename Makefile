@@ -14,11 +14,11 @@ ID        ?= pager-1
 COMPOSE   := docker compose
 LOAD_ENV  := set -a && . ./$(ENV_FILE) && set +a
 
-.PHONY: help env install test run build up up-public logs-caddy down ingest-token audit rotate-secrets ota-keygen ota-sign ota-install ota-publish restart logs ps health device rotate backup import-db \
+.PHONY: help env install test run build up up-public logs-caddy down ingest-token audit rotate-secrets ota-keygen ota-sign ota-install ota-publish restart logs ps health device rotate backup restore backup-timer backup-timer-remove backup-pull import-db \
         demo fw-build fw-test fw-sim fw-diag fw-flash fw-monitor clean
 
 help: ## Show this help
-	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z_-]+:.*## /{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z_-]+:.*## /{printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # ------------------------------------------------------------------ configuration
 
@@ -97,11 +97,33 @@ device: ## Register a device in the container and print its token once (ID=pager
 rotate: ## Issue a new token for a device in the container (ID=pager-1)
 	$(COMPOSE) exec smartpager smartpager-admin device-rotate $(ID)
 
-backup: ## Consistent SQLite snapshot of the container database into ./backups/
-	@mkdir -p backups && f=smartpager-$$(date +%Y%m%d-%H%M%S).db && \
-	$(COMPOSE) exec -T smartpager python -c "import sqlite3; s=sqlite3.connect('/data/smartpager.db'); d=sqlite3.connect('/data/$$f'); s.backup(d); d.close()" && \
-	docker cp "$$($(COMPOSE) ps -q smartpager):/data/$$f" backups/$$f && \
-	$(COMPOSE) exec -T smartpager rm -f /data/$$f && chmod 600 backups/$$f && echo "backups/$$f"
+backup: $(ENV_FILE) ## Back up database + .env + OTA release to backups/*.tar.gz (keeps BACKUP_KEEP=14)
+	@scripts/backup.sh
+
+restore: ## Restore a backup archive (FILE=backups/smartpager-….tar.gz); safety backup first
+	@scripts/restore.sh "$(FILE)"
+
+backup-timer: $(ENV_FILE) ## Install a nightly backup (systemd timer, needs sudo; Linux server)
+	@command -v systemctl >/dev/null || { echo "systemd not found — schedule scripts/backup.sh with cron instead" >&2; exit 1; }
+	@printf '%s\n' '[Unit]' 'Description=SmartPager backup' 'After=docker.service' 'Requires=docker.service' '' \
+	  '[Service]' 'Type=oneshot' "User=$$(id -un)" "WorkingDirectory=$(CURDIR)" "ExecStart=/bin/bash $(CURDIR)/scripts/backup.sh" \
+	  | sudo tee /etc/systemd/system/smartpager-backup.service >/dev/null
+	@printf '%s\n' '[Unit]' 'Description=Nightly SmartPager backup' '' \
+	  '[Timer]' 'OnCalendar=*-*-* 03:30:00' 'RandomizedDelaySec=15m' 'Persistent=true' '' \
+	  '[Install]' 'WantedBy=timers.target' \
+	  | sudo tee /etc/systemd/system/smartpager-backup.timer >/dev/null
+	sudo systemctl daemon-reload
+	sudo systemctl enable --now smartpager-backup.timer
+	@systemctl list-timers smartpager-backup.timer --no-pager
+	@echo "test it now: sudo systemctl start smartpager-backup && journalctl -u smartpager-backup -n 20"
+
+backup-timer-remove: ## Remove the nightly backup timer
+	-sudo systemctl disable --now smartpager-backup.timer
+	sudo rm -f /etc/systemd/system/smartpager-backup.{service,timer}
+	sudo systemctl daemon-reload
+
+backup-pull: ## On your computer: copy new server backups here (HOST=user@server [SSH_KEY=…])
+	@SSH_KEY="$(SSH_KEY)" scripts/backup-pull.sh "$(HOST)"
 
 import-db: ## Replace the container database with DB=path/to.db (stops the server first)
 	@test -n "$(DB)" -a -f "$(DB)" || { echo "usage: make import-db DB=path/to/smartpager.db" >&2; exit 1; }

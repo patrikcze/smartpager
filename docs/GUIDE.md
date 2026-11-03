@@ -291,13 +291,71 @@ Run these on the server:
 | Task | Command |
 |---|---|
 | Status | `make health`, `make ps`, `make logs`, `make logs-caddy` |
-| Backup the database (copy it off the server) | `make backup`, then `scp you@your-server:smartpager/backups/*.db .` |
+| Backup now | `make backup` (see [Backups](#backups-and-recovery) below) |
 | Who did what | `make audit` |
 | New admin token | `make rotate-secrets` |
 | Lost or stolen pager | `make rotate ID=pager-1`, immediately |
 | Remove a pager | `docker compose exec smartpager smartpager-admin device-delete pager-1` |
 | Update the server software | `git pull && make up-public` |
 | Stop everything | `make down` (data and certificates are kept in Docker volumes) |
+
+### Backups and recovery
+
+**What needs protecting, and where it lives:**
+
+| What | Where | Backed up by | If lost |
+|---|---|---|---|
+| Messages, devices, ingest tokens, audit log | the server's database (Docker volume) | `make backup` | gone, unless backed up |
+| Admin token and settings | the server's `.env` | `make backup` | recreate with `make env` |
+| Installed firmware update | the server (`/data/firmware`) | `make backup` | sign and install again |
+| HTTPS certificate | Caddy's Docker volume | not needed | Caddy obtains a new one on start |
+| **OTA signing key** | your computer, `secrets/ota_signing_key.pem` | **you**, see below | pagers accept no more updates until reflashed over USB |
+
+**1. Nightly backups on the server.** Run once, on the server:
+
+```bash
+make backup-timer
+```
+
+Every night at about 03:30 this writes `backups/smartpager-<date>.tar.gz` (database snapshot checked for integrity, `.env`, firmware release) and keeps the newest 14 (`BACKUP_KEEP` in `.env`). It runs even if the server was off at 03:30 (catch-up on boot). Try it right away and look at the result:
+
+```bash
+sudo systemctl start smartpager-backup && journalctl -u smartpager-backup -n 20
+```
+
+To be paged when a backup fails, create a token for it and put it into `.env`:
+
+```bash
+make ingest-token NAME=backup            # prints spi_…
+echo 'BACKUP_NOTIFY_TOKEN=spi_…' >> .env # paste the printed token
+```
+
+**2. Copy them off the server.** A backup that lives only on the VM disappears with it. On your computer, in the SmartPager checkout:
+
+```bash
+make backup-pull HOST=rocky@pager.example.com SSH_KEY=~/.ssh/your-server-key
+```
+
+It downloads only archives you don't have yet into `backups/pager.example.com/` (git-ignored, owner-only access). Run it now and then, or add it to your computer's scheduler.
+
+The archives contain the server's `.env`, so **treat them like passwords**. Keep them on an encrypted disk (FileVault on macOS), and don't put them in a shared or unencrypted cloud folder.
+
+**3. Back up the OTA signing key** (on your computer, once): copy `secrets/ota_signing_key.pem` into your password manager as a secure note, or to an encrypted USB stick. It never needs to go to the server.
+
+**Restore**, on the same or a new server (§3–§5 done, `.env` optional):
+
+```bash
+scp backups/pager.example.com/smartpager-<date>.tar.gz rocky@pager.example.com:smartpager/backups/
+```
+
+```bash
+make restore FILE=backups/smartpager-<date>.tar.gz   # on the server
+make up-public
+```
+
+Restore shows what the archive contains and asks before replacing anything. It takes a safety backup of the current state first. If the server has no `.env` yet, it uses the one from the archive. Otherwise it keeps yours and saves the archive's copy as `.env.restored-<date>` for comparison. Pagers and integrations keep working with their existing tokens, because those are stored in the database.
+
+To check that a restore works without touching your server, run it on a spare VM or your own computer every few months.
 
 ## 11. Security checklist
 
@@ -307,7 +365,7 @@ Run these on the server:
 - [ ] One ingest token per integration. Once nothing uses the shared `SMARTPAGER_INGEST_TOKEN`, empty it in `.env` and run `make up-public`.
 - [ ] Tokens that ever travelled over plain HTTP are rotated (`make rotate-secrets`, `make rotate ID=…`).
 - [ ] The OTA signing key is backed up and exists **only** on your computer.
-- [ ] The server's `.env` and the backups are protected, and never shared or committed.
+- [ ] Nightly backups run (`make backup-timer`), copies are pulled off the server (`make backup-pull`), and the OTA signing key is stored safely. The archives contain secrets: keep them on encrypted storage, never shared or committed.
 - [ ] SSH on the server uses keys (password login disabled), and the OS gets security updates (`unattended-upgrades` on Ubuntu).
 - [ ] You know what isn't protected: messages are readable on the server and on the pager ([SECURITY.md](SECURITY.md#what-is-encrypted)).
 
@@ -347,16 +405,18 @@ For another proxy, copy the allow-list from [`deploy/Caddyfile`](../deploy/Caddy
 To keep messages and devices from an earlier server:
 
 ```bash
-make backup      # on the old machine: backups/smartpager-….db
+make backup      # on the old machine: backups/smartpager-….tar.gz
 ```
 
 ```bash
-scp backups/smartpager-*.db you@your-server:smartpager/
+scp backups/smartpager-<date>.tar.gz you@your-server:smartpager/backups/
 ```
 
 ```bash
-make import-db DB=smartpager-….db    # on the new server
+make restore FILE=backups/smartpager-<date>.tar.gz    # on the new server; keeps its own .env
 ```
+
+A bare SQLite file from elsewhere can be imported with `make import-db DB=path/to.db`.
 
 Then rotate every device token (`make rotate ID=…`) and re-provision the pagers (§6.4). The tokens in that database may have travelled over plain HTTP.
 
